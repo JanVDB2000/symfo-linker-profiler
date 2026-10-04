@@ -3,7 +3,9 @@ use crate::errors::SymfoLinkerError;
 use crate::journal::{self, BackupRecord, SwapState};
 use crate::lock::RootLock;
 use crate::write_guard::WriteGuard;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, path::Path, path::PathBuf};
+static ARCHIVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Where Composer put the package.
 pub fn vendor_path(project: &Path, package: &str) -> PathBuf {
@@ -196,6 +198,70 @@ pub fn with_vendor_backup<T>(
         Err(step_error) => {
             restore_vendor(lock, guard, project, package)?;
             Err(step_error)
+        }
+    }
+}
+
+/// Composer may replace a linked package with a fresh directory while the old
+/// backup remains. Keep that older version in history, then back up the newly
+/// installed version. No package directory is deleted or overwritten.
+pub fn with_current_vendor_backup<T>(
+    lock: &RootLock,
+    guard: &WriteGuard,
+    project: &Path,
+    package: &str,
+    step: impl FnOnce(&Path) -> Result<T, SymfoLinkerError>,
+) -> Result<T, SymfoLinkerError> {
+    let vendor = vendor_path(project, package);
+    let backup = backup_path(project, package);
+    guard.assert_vendor_path(project, &vendor)?;
+    guard.assert_vendor_path(project, &backup)?;
+    require_real_directory(&vendor).map_err(|_| SymfoLinkerError::VendorPackageMissing {
+        path: vendor.to_string_lossy().into_owned(),
+    })?;
+    if fs::symlink_metadata(&backup).is_err() {
+        return with_vendor_backup(lock, guard, project, package, step);
+    }
+    require_restorable_backup(guard, project, package)?;
+    let archive = project
+        .join("vendor/.symfolinker/.history")
+        .join(package)
+        .join(format!(
+            "{}-{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            std::process::id(),
+            ARCHIVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+    guard.assert_vendor_path(project, &archive)?;
+    create_parent(&archive)?;
+    let previous = journal::read_checked(project)?.remove(package);
+    // The sidecar explains the archive even if the process exits before linking.
+    let metadata = archive.with_extension("json");
+    guard.assert_vendor_path(project, &metadata)?;
+    let record = previous
+        .clone()
+        .unwrap_or_else(|| BackupRecord::new(package, project, None, SwapState::Linked));
+    let bytes = serde_json::to_vec_pretty(&record).map_err(|e| SymfoLinkerError::IoError {
+        path: metadata.to_string_lossy().into_owned(),
+        detail: e.to_string(),
+    })?;
+    crate::atomic::write_atomically(&metadata, &bytes)?;
+    fs::rename(&backup, &archive).map_err(|e| SymfoLinkerError::io(&backup, &e))?;
+    match with_vendor_backup(lock, guard, project, package, step) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // Only put history back when the new backup was successfully rolled
+            // back. An unresolved failure must preserve both versions in place.
+            if fs::symlink_metadata(&backup).is_err() {
+                fs::rename(&archive, &backup).map_err(|e| SymfoLinkerError::io(&archive, &e))?;
+                if let Some(record) = previous {
+                    journal::record(guard, project, record)?;
+                }
+            }
+            Err(error)
         }
     }
 }

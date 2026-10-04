@@ -64,6 +64,8 @@ export interface ContainerReport {
   projectContainerPath: string | null
   checks: ContainerCheck[]
   message: Message | null
+  mountPlan?: { packageName: string; hostPath: string; containerPath: string }[]
+  canApplyMounts?: boolean
 }
 
 /** One local package and every project that currently links to it. */

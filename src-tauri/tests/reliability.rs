@@ -56,6 +56,68 @@ impl Drop for Workspace {
 }
 
 #[test]
+fn composer_reinstall_can_be_linked_again_and_both_vendor_versions_survive() {
+    let workspace = Workspace::new();
+    let app = workspace.0.join("app");
+    let vendor = backup::vendor_path(&app, PACKAGE);
+    profile::apply(&workspace.0, &[Workspace::entry("app", "local")]).unwrap();
+    // Simulate Composer replacing the link with a newly installed directory.
+    {
+        let guard = WriteGuard::new(&workspace.0);
+        links::remove_link(&guard, &app, &vendor).unwrap();
+    }
+    fs::create_dir_all(&vendor).unwrap();
+    fs::write(vendor.join("marker"), "composer-new").unwrap();
+    profile::apply(&workspace.0, &[Workspace::entry("app", "local")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(backup::backup_path(&app, PACKAGE).join("marker")).unwrap(),
+        "composer-new"
+    );
+    let history = app.join("vendor/.symfolinker/.history/acme/bundle");
+    let archived = fs::read_dir(history)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(archived.path().join("marker")).unwrap(),
+        "composer"
+    );
+    profile::apply(&workspace.0, &[Workspace::entry("app", "vendor")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(vendor.join("marker")).unwrap(),
+        "composer-new"
+    );
+}
+
+#[test]
+fn failed_relink_after_composer_reinstall_rolls_back_both_directories() {
+    let workspace = Workspace::new();
+    let app = workspace.0.join("app");
+    let guard = WriteGuard::new(&workspace.0);
+    let lock = RootLock::acquire(&workspace.0).unwrap();
+    backup::backup_vendor(&lock, &guard, &app, PACKAGE).unwrap();
+    let vendor = backup::vendor_path(&app, PACKAGE);
+    fs::create_dir_all(&vendor).unwrap();
+    fs::write(vendor.join("marker"), "composer-new").unwrap();
+    let outcome: Result<(), _> =
+        backup::with_current_vendor_backup(&lock, &guard, &app, PACKAGE, |_| {
+            Err(symfolinker_lib::errors::SymfoLinkerError::BrokenSymlink {
+                path: "simulated link failure".into(),
+            })
+        });
+    assert!(outcome.is_err());
+    assert_eq!(
+        fs::read_to_string(vendor.join("marker")).unwrap(),
+        "composer-new"
+    );
+    assert_eq!(
+        fs::read_to_string(backup::backup_path(&app, PACKAGE).join("marker")).unwrap(),
+        "composer"
+    );
+}
+
+#[test]
 fn profile_round_trip_preserves_all_originals() {
     let workspace = Workspace::new();
     let entries = [

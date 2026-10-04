@@ -251,5 +251,15 @@
   "Recovery restores preserved packages at empty vendor paths and reconciles completed operations. Occupied paths are left untouched.": "Herstel zet bewaarde packages terug op lege vendor-paden en controleert afgeronde operaties. Bezette paden blijven onaangeroerd.",
   "{engine} did not answer within {seconds} seconds.": "{engine} antwoordde niet binnen {seconds} seconden.",
   "{name}: backup journal is invalid or unreadable. Recovery requires a valid journal.": "{name}: het backupjournaal is ongeldig of onleesbaar. Herstel vereist een geldig journaal.",
-  "{name}: interrupted operation for {package}. Use Health to recover.": "{name}: onderbroken operatie voor {package}. Gebruik Health om te herstellen."
+  "{name}: interrupted operation for {package}. Use Health to recover.": "{name}: onderbroken operatie voor {package}. Gebruik Health om te herstellen.",
+  "An older backup will be archived. The current Composer package will become the new backup.": "Een oudere backup wordt gearchiveerd. Het huidige Composer-package wordt de nieuwe backup.",
+  "Missing local source mounts": "Ontbrekende mounts voor lokale bronnen",
+  "The host symlink points outside the application mount. Mount its local source at the destination below.": "De symlink op de host wijst buiten de applicatiemount. Mount de lokale bron op de onderstaande bestemming.",
+  "Apply mounts and recreate PHP service": "Mounts toepassen en PHP-service opnieuw aanmaken",
+  "The original Compose files stay unchanged. SymfoLinker adds an override and recreates only the selected PHP service after confirmation.": "De originele Compose-bestanden blijven ongewijzigd. SymfoLinker voegt een override toe en maakt na bevestiging alleen de gekozen PHP-service opnieuw aan.",
+  "The running service's Compose files could not be verified. No containers were changed.": "De Compose-bestanden van de draaiende service konden niet worden gecontroleerd. Er zijn geen containers gewijzigd.",
+  "A different source is already mounted at {path}. No containers were changed.": "Op {path} is al een andere bron gemount. Er zijn geen containers gewijzigd.",
+  "The mount override directory is unsafe. No containers were changed.": "De map voor mount-overrides is onveilig. Er zijn geen containers gewijzigd.",
+  "The PHP service {service} will briefly stop and be recreated with the missing mounts. Other services are not recreated.": "De PHP-service {service} stopt kort en wordt opnieuw aangemaakt met de ontbrekende mounts. Andere services worden niet opnieuw aangemaakt.",
+  "Mounted data is reused. Changes stored only inside the container are lost when it is recreated.": "Gemounte gegevens worden hergebruikt. Wijzigingen die alleen in de container zijn opgeslagen gaan verloren bij het opnieuw aanmaken."
 }

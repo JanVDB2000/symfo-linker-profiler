@@ -117,13 +117,21 @@ pub(crate) fn engine_responds(binary: &str) -> bool {
 /// Docker and Podman take identical arguments for everything used here, so only the
 /// binary differs.
 pub(crate) fn container_output(dir: &Path, args: &[&str]) -> Result<String, Message> {
+    container_output_with_timeout(dir, args, COMMAND_TIMEOUT)
+}
+
+pub(crate) fn container_output_with_timeout(
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, Message> {
     let Some(engine) = engine::current() else {
         return Err(Message::new(
             "No container engine found. Is docker or podman in PATH?",
         ));
     };
     let command = engine_command(engine.binary(), Some(dir), args);
-    let output = output_within(command, COMMAND_TIMEOUT).map_err(|failure| match failure {
+    let output = output_within(command, timeout).map_err(|failure| match failure {
         CommandError::NotStarted => Message::with(
             "{engine} CLI not found. Is it in PATH?",
             "engine",
@@ -139,7 +147,7 @@ pub(crate) fn container_output(dir: &Path, args: &[&str]) -> Result<String, Mess
             );
             message
                 .params
-                .insert("seconds".to_owned(), COMMAND_TIMEOUT.as_secs().to_string());
+                .insert("seconds".to_owned(), timeout.as_secs().to_string());
             message
         }
         CommandError::Interrupted => Message::with(

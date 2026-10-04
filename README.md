@@ -81,7 +81,7 @@ Projects are read-only outside `vendor/`. SymfoLinker writes in exactly two plac
 | Location | Contents |
 | --- | --- |
 | `<project>/vendor/` | The package link, preserved Composer directory, recovery journal (`vendor/.symfolinker/state.json`) and temporarily staged restore links. |
-| `<root>/.symfolinker/` | `lock` (one mutation at a time) and `config.json` (the PHP service per project). Above the projects, never inside one. |
+| `<root>/.symfolinker/` | `lock` (one mutation at a time) and `config.json` (the PHP service per project), plus generated container-mount overrides in `compose/<project>/<service>.json`. Above the projects, never inside one. |
 
 The last scanned root, theme, layout width and language are remembered in local webview storage (`localStorage` keys `symfolinker.root`, `symfolinker.theme`, `symfolinker.width` and `symfolinker.language`), rather than in a project file.
 
@@ -91,13 +91,23 @@ The scan result itself is cached there too (`symfolinker.scan`, plus the selecte
 
 Successful desktop scans automatically add their root to **Settings > Saved workspaces**. Open a saved root to scan it, or remove its shortcut. Shortcuts live in local webview storage (`symfolinker.workspaces`); removing one does not change any project files.
 
-In **Settings > Link profiles**, save all current package modes under a name. Saving requires a fresh scan with no unknown package modes. Profiles are scoped to the development root and stored locally (`symfolinker.profiles`); saving the same name replaces that profile. Applying opens a confirmation listing every project, package and target mode. The backend takes one root lock, resolves the entire profile from a fresh scan and validates it before switching. If a later switch fails, completed changes are reversed in reverse order. Rollback can itself fail on external filesystem changes or I/O errors; the error identifies the affected path, and the interface discards uncertain cached state so a Refresh is required.
+In **Settings > Link profiles**, save all current package modes under a name. Saving requires a fresh scan with no unknown package modes. Profiles are scoped to the development root and stored locally (`symfolinker.profiles`); saving the same name replaces that profile. Applying opens a confirmation listing every project, package and target mode. The backend takes one root lock, resolves the entire profile from a fresh scan and validates it before switching. If a later switch fails, completed changes are reversed in reverse order. Rollback can itself fail on external filesystem changes or I/O errors; the error identifies the affected path, and the interface automatically refreshes the workspace after errors. If that refresh also fails, projects stay visible but filesystem switches are blocked until Refresh succeeds.
 
 **Health > Recover interrupted swaps** reconciles the selected project's journal with disk. A preserved backup at an empty vendor path is restored, even when the local checkout is gone. A broken local link is restored to the preserved Composer package, including when its checkout has disappeared. A completed working local switch is marked complete; a completed vendor restore clears the record and removes any staged link. Conflicting occupied paths are refused. Recovery is explicit: scanning never repairs or writes project files. A malformed journal is reported and preserved rather than overwritten.
 
 Restoring VENDOR first verifies the backup, then stages the original link with a rename. If restoring fails, that exact link is moved back, including a broken symlink or junction. This preserves the local state without having to reconstruct a target that no longer exists. New journal records identify their project and package; legacy unrecorded backups remain visibly unrecognized.
 
-Git and container requests are scoped to the current workspace and project. Late responses from an earlier selection are discarded, and changing projects starts its own status refresh immediately. After an uncertain swap result, cached package modes are cleared and the error stays visible until the workspace is scanned again.
+Git and container requests are scoped to the current workspace and project. Late responses from an earlier selection are discarded, and changing projects starts its own status refresh immediately. After a swap error, the workspace is automatically read back without losing the selected project. If readback fails too, its data remains visible as stale, the disk cache is cleared and further filesystem switches require a successful Refresh.
+
+### Composer reinstall and missing container mounts
+
+If `composer install` replaces a local link with a fresh vendor directory while an earlier backup remains, switching back to LOCAL now archives the earlier directory under `vendor/.symfolinker/.history/<vendor>/<package>/`. The newly installed Composer directory becomes the active backup. Switching to VENDOR restores that newest version. Both versions are preserved; a failed link step rolls the directory moves back. Each archived directory has a JSON sidecar with its recorded package/project/version metadata. Archives are never automatically deleted.
+
+In **Runtime**, container inspection reads the running service's actual bind mounts. An application-only mount such as `/home/user/dev/app:/application` does not expose sibling repositories: `vendor/acme/bundle -> ../../../bundle` resolves to `/bundle` inside the container. **Missing local source mounts** lists the required host sources and exact container destinations, including mounts that can be prepared before activating LOCAL.
+
+**Apply mounts and recreate PHP service** opens a confirmation with those paths and the service that will briefly stop. SymfoLinker verifies the running container's project, service, original Compose files and custom environment files from its labels, writes an additional JSON Compose override above the projects, validates the combined configuration, and runs `compose up -d --no-deps --no-build --pull never --force-recreate` for that service only. Project Compose files remain unchanged. A mounted path already occupied by another source is refused.
+
+Docker cannot attach an extra bind mount to an already-running container in place; a normal restart does not apply new mounts. The service must be recreated. Its image and mounted volumes are reused, but data stored only in the container's writable layer is not preserved by recreation. If the original Compose context cannot be verified (for example, a Podman provider without compatible labels), the required paths are displayed but automatic recreation is disabled. Later external `docker compose up` commands must include the generated override to retain these additional mounts; applying mounts again in SymfoLinker restores them if they were omitted.
 
 ## Safety model
 

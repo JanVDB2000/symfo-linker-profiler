@@ -24,6 +24,7 @@ const wide = ref(localStorage.getItem('symfolinker.width') === 'full')
 watch(wide, value => localStorage.setItem('symfolinker.width', value ? 'full' : 'normal'))
 const workspaceControls = ref(false)
 const profileName = ref('')
+const pendingMounts = ref(false)
 const pendingProfile = ref<(typeof workspace.workspaceProfiles)[number] | null>(null)
 function saveProfile() { if (workspace.saveProfile(profileName.value)) profileName.value = '' }
 const tabs = [
@@ -38,7 +39,7 @@ const issues = computed(() => workspace.selected?.packages.filter(p => p.mode ==
 // Confirmation state for a pending switch; null while no dialog is open.
 const pendingSwap = ref<{ pkg: PackageStatus; target: 'local' | 'vendor'; projectId: string } | null>(null)
 function askSwap(pkg: PackageStatus, target: 'local' | 'vendor') {
-  if (pkg.mode === target || workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot) return
+  if (pkg.mode === target || workspace.swapping || workspace.busy || workspace.mutationBlocked || workspace.root !== workspace.result?.developmentRoot) return
   pendingSwap.value = { pkg, target, projectId: workspace.selectedId }
 }
 async function confirmSwap() {
@@ -48,7 +49,7 @@ async function confirmSwap() {
   await workspace.setMode(pending.pkg, pending.target)
 }
 
-watch(() => `${workspace.root}\0${workspace.selectedId}`, () => { pendingSwap.value = null; pendingProfile.value = null })
+watch(() => `${workspace.root}\0${workspace.selectedId}`, () => { pendingSwap.value = null; pendingProfile.value = null; pendingMounts.value = false })
 
 const docker = computed(() => workspace.status?.docker ?? null)
 const servicesUp = computed(() => docker.value?.services.filter(s => s.running).length ?? 0)
@@ -132,7 +133,7 @@ async function chooseRoot() {
             <div class="metrics"><div class="metric"><strong>{{ workspace.result?.projects.length ?? '—' }}</strong><span>{{ t('Projects') }}</span></div><div class="metric"><strong>{{ workspace.selected?.packages.length ?? '—' }}</strong><span>{{ t('Local dependencies') }}</span></div><div class="metric"><strong>{{ workspace.selected ? localCount : '—' }}</strong><span>{{ t('Active links') }}</span></div><div class="metric"><strong :class="{ 'text-warning': issues.length }">{{ workspace.selected ? issues.length : '—' }}</strong><span>{{ t('Issues') }}</span></div></div>
             <div v-if="workspace.busy && !workspace.result" class="empty empty-panel scanning-panel"><Spinner size="large" :label="t('Scanning workspace')" /><h3>{{ t('Scanning workspace') }}</h3><p>{{ t('Reading composer.json, Git status and vendor paths.') }}</p></div>
             <template v-else-if="workspace.selected">
-              <h3 class="heading-live">{{ t('Project details') }} <small>{{ workspace.selected.name }}</small><span class="heading-actions"><span v-if="checkedAt" class="live" :title="t('Sync every 5 minutes while this project is selected')"><span class="live-dot"></span>{{ t('updated {time}', { time: checkedAt }) }}</span><button class="button button-small" :disabled="workspace.statusBusy" :title="t('Refresh Git and container status for {project} now', { project: workspace.selected.name })" @click="workspace.refreshStatus()"><ProfilerIcon name="refresh" />{{ workspace.statusBusy ? t('Syncing...') : t('Sync') }}</button></span></h3>
+              <h3 class="heading-live">{{ t('Project details') }} <small>{{ workspace.selected.name }}</small><span class="heading-actions"><span v-if="checkedAt" class="live" :title="t('Sync every 5 minutes while this project is selected')"><span class="live-dot"></span>{{ t('updated {time}', { time: checkedAt }) }}</span><button class="button button-small" :disabled="workspace.statusBusy || workspace.busy || !!workspace.swapping" :title="t('Refresh Git and container status for {project} now', { project: workspace.selected.name })" @click="workspace.scan()"><ProfilerIcon name="refresh" />{{ (workspace.statusBusy || workspace.busy) ? t('Syncing...') : t('Sync') }}</button></span></h3>
               <div class="table-scroll"><table class="property-table"><tbody>
                 <tr><th scope="row">{{ t('Composer package') }}</th><td>{{ workspace.selected.composerName ?? t('Not configured') }}</td></tr>
                 <tr><th scope="row">{{ t('Project path') }}</th><td class="path">{{ workspace.selected.path }}</td></tr>
@@ -148,8 +149,8 @@ async function chooseRoot() {
                   <td><strong class="package-name">{{ pkg.packageName }}</strong><div class="package-constraint">{{ pkg.constraint }} <span v-if="pkg.dependencyType === 'requireDev'" class="label">require-dev</span></div><details class="package-paths"><summary>{{ t('Paths') }}</summary><dl><dt>{{ t('Local') }}</dt><dd>{{ pkg.localPath }}</dd><dt>{{ t('Vendor') }}</dt><dd>{{ pkg.vendorPath }}</dd><dt>{{ t('Backup') }}</dt><dd>{{ pkg.backupPath }}</dd></dl></details></td>
                   <td><div v-if="pkg.mode === 'unknown'" class="mode-switch"><span class="label status-warning">{{ t('UNKNOWN') }}</span></div>
                     <div v-else class="mode-switch" role="group" :aria-label="t('Mode for {name}', { name: pkg.packageName })">
-                      <button class="mode-option" :class="{ active: pkg.mode === 'vendor' }" :aria-pressed="pkg.mode === 'vendor'" :disabled="!!workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'vendor')">{{ t('VENDOR') }}</button>
-                      <button class="mode-option" :class="{ active: pkg.mode === 'local' }" :aria-pressed="pkg.mode === 'local'" :disabled="!!workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'local')">{{ t('LOCAL') }}</button>
+                      <button class="mode-option" :class="{ active: pkg.mode === 'vendor' }" :aria-pressed="pkg.mode === 'vendor'" :disabled="!!workspace.swapping || workspace.busy || workspace.mutationBlocked || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'vendor')">{{ t('VENDOR') }}</button>
+                      <button class="mode-option" :class="{ active: pkg.mode === 'local' }" :aria-pressed="pkg.mode === 'local'" :disabled="!!workspace.swapping || workspace.busy || workspace.mutationBlocked || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'local')">{{ t('LOCAL') }}</button>
                       <span v-if="workspace.swapping === pkg.packageName" class="mode-busy">{{ t('Switching...') }}</span>
                     </div></td>
                   <td><span class="branch"><ProfilerIcon name="branch" />{{ pkg.git?.branch ?? '—' }}</span><div v-if="pkg.git?.dirty" class="text-warning">{{ t('{count} changed', { count: pkg.git.changedFiles }) }}</div></td>
@@ -206,6 +207,16 @@ async function chooseRoot() {
                   <tr v-for="[host, inside] in workspace.container.volumes" :key="host"><td class="path">{{ host }}</td><td class="path">{{ inside }}</td></tr>
                 </tbody></table></div>
                 <div v-else class="empty"><p>{{ t('This service has no bind mounts.') }}</p></div>
+                <template v-if="workspace.container.mountPlan?.length">
+                  <h3>{{ t('Missing local source mounts') }}</h3>
+                  <p class="notice warning">{{ t('The host symlink points outside the application mount. Mount its local source at the destination below.') }}</p>
+                  <div class="table-scroll"><table><thead><tr><th>{{ t('Local source:') }}</th><th>{{ t('Container') }}</th></tr></thead><tbody>
+                    <tr v-for="mount in workspace.container.mountPlan" :key="mount.containerPath"><td class="path">{{ mount.hostPath }}</td><td class="path">{{ mount.containerPath }}</td></tr>
+                  </tbody></table></div>
+                  <button class="button button-primary" :disabled="!workspace.container.canApplyMounts || workspace.containerBusy || !!workspace.swapping" @click="pendingMounts = true">{{ t('Apply mounts and recreate PHP service') }}</button>
+                  <p class="help">{{ t('The original Compose files stay unchanged. SymfoLinker adds an override and recreates only the selected PHP service after confirmation.') }}</p>
+                  <p v-if="!workspace.container.canApplyMounts" class="notice warning">{{ t("The running service's Compose files could not be verified. No containers were changed.") }}</p>
+                </template>
                 <h3>{{ t('Linked packages in container') }}</h3>
                 <div v-if="workspace.container.checks.length" class="table-scroll"><table><thead><tr><th scope="col">{{ t('Package') }}</th><th scope="col">{{ t('Container path') }}</th><th scope="col">{{ t('Present') }}</th><th scope="col">{{ t('Link target') }}</th></tr></thead><tbody>
                   <tr v-for="check in workspace.container.checks" :key="check.packageName">
@@ -265,6 +276,7 @@ async function chooseRoot() {
           <template v-if="pendingSwap.target === 'local'">
             <p>{{ t('The original Composer package will be preserved in:') }}</p>
             <p class="path dialog-path">{{ pendingSwap.pkg.backupPath }}</p>
+            <p v-if="pendingSwap.pkg.backupStatus !== 'missing'" class="notice warning">{{ t('An older backup will be archived. The current Composer package will become the new backup.') }}</p>
             <p>{{ t('Local source:') }}</p>
             <p class="path dialog-path">{{ pendingSwap.pkg.localPath }}</p>
           </template>
@@ -281,6 +293,15 @@ async function chooseRoot() {
           <p>{{ t('All packages are checked before switching. Completed changes are rolled back if a later switch fails.') }}</p>
           <ul><li v-for="entry in pendingProfile.entries" :key="`${entry.projectId}/${entry.packageName}`">{{ entry.projectId }} / {{ entry.packageName }}: {{ entry.mode.toUpperCase() }}</li></ul>
           <div class="dialog-actions"><button class="button" @click="pendingProfile = null">{{ t('Cancel') }}</button><button class="button button-primary" @click="workspace.applyProfile(pendingProfile); pendingProfile = null">{{ t('Apply profile') }}</button></div>
+        </div>
+      </div>
+      <div v-if="pendingMounts && workspace.container" class="dialog-backdrop" @click.self="pendingMounts = false">
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="mount-title">
+          <h3 id="mount-title">{{ t('Apply mounts and recreate PHP service') }}</h3>
+          <p>{{ t('The PHP service {service} will briefly stop and be recreated with the missing mounts. Other services are not recreated.', { service: workspace.container.phpService ?? '' }) }}</p>
+          <p>{{ t('Mounted data is reused. Changes stored only inside the container are lost when it is recreated.') }}</p>
+          <ul><li v-for="mount in workspace.container.mountPlan" :key="mount.containerPath" class="path">{{ mount.hostPath }} &rarr; {{ mount.containerPath }}</li></ul>
+          <div class="dialog-actions"><button class="button" @click="pendingMounts = false">{{ t('Cancel') }}</button><button class="button button-primary" @click="pendingMounts = false; workspace.applyContainerMounts()">{{ t('Apply mounts and recreate PHP service') }}</button></div>
         </div>
       </div>
       <footer class="profiler-footer"><span>SymfoLinker <span class="muted">· {{ t('Read-only scanner') }}</span></span><span>{{ t('Composer workspace tools') }}</span></footer>

@@ -68,9 +68,7 @@ pub fn apply(root: &Path, entries: &[ProfileEntry]) -> Result<ScanResult, SymfoL
                 &backup::backup_path(&project_path, &entry.package_name),
             )?;
             if fs::symlink_metadata(&pkg.backup_path).is_ok() {
-                return Err(SymfoLinkerError::BackupAlreadyExists {
-                    path: pkg.backup_path.clone(),
-                });
+                backup::require_restorable_backup(&guard, &project_path, &entry.package_name)?;
             }
             if !Path::new(&pkg.local_path).is_dir() {
                 return Err(SymfoLinkerError::LocalProjectNotFound {

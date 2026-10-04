@@ -251,5 +251,15 @@
   "Recovery restores preserved packages at empty vendor paths and reconciles completed operations. Occupied paths are left untouched.": "La récupération restaure les paquets sauvegardés aux chemins vendor vides et vérifie les opérations terminées. Les chemins occupés restent intacts.",
   "{engine} did not answer within {seconds} seconds.": "{engine} n’a pas répondu dans les {seconds} secondes.",
   "{name}: backup journal is invalid or unreadable. Recovery requires a valid journal.": "{name} : le journal des sauvegardes est invalide ou illisible. La restauration exige un journal valide.",
-  "{name}: interrupted operation for {package}. Use Health to recover.": "{name} : opération interrompue pour {package}. Utilisez Health pour restaurer."
+  "{name}: interrupted operation for {package}. Use Health to recover.": "{name} : opération interrompue pour {package}. Utilisez Health pour restaurer.",
+  "An older backup will be archived. The current Composer package will become the new backup.": "Une ancienne sauvegarde sera archivée. Le paquet Composer actuel deviendra la nouvelle sauvegarde.",
+  "Missing local source mounts": "Montages des sources locales manquants",
+  "The host symlink points outside the application mount. Mount its local source at the destination below.": "Le lien symbolique pointe hors du montage de l’application. Montez sa source locale à la destination ci-dessous.",
+  "Apply mounts and recreate PHP service": "Appliquer les montages et recréer le service PHP",
+  "The original Compose files stay unchanged. SymfoLinker adds an override and recreates only the selected PHP service after confirmation.": "Les fichiers Compose originaux restent inchangés. SymfoLinker ajoute un fichier de surcharge et recrée uniquement le service PHP choisi après confirmation.",
+  "The running service's Compose files could not be verified. No containers were changed.": "Les fichiers Compose du service actif n’ont pas pu être vérifiés. Aucun conteneur n’a été modifié.",
+  "A different source is already mounted at {path}. No containers were changed.": "Une autre source est déjà montée sur {path}. Aucun conteneur n’a été modifié.",
+  "The mount override directory is unsafe. No containers were changed.": "Le dossier des surcharges de montage n’est pas sûr. Aucun conteneur n’a été modifié.",
+  "The PHP service {service} will briefly stop and be recreated with the missing mounts. Other services are not recreated.": "Le service PHP {service} sera brièvement arrêté puis recréé avec les montages manquants. Les autres services ne seront pas recréés.",
+  "Mounted data is reused. Changes stored only inside the container are lost when it is recreated.": "Les données montées sont réutilisées. Les modifications stockées uniquement dans le conteneur sont perdues lors de sa recréation."
 }

@@ -113,6 +113,8 @@ pub struct ContainerReport {
     pub project_container_path: Option<String>,
     pub checks: Vec<ContainerCheck>,
     pub message: Option<Message>,
+    pub mount_plan: Vec<ContainerMount>,
+    pub can_apply_mounts: bool,
 }
 
 impl ContainerReport {
@@ -126,8 +128,18 @@ impl ContainerReport {
             project_container_path: None,
             checks: Vec::new(),
             message: Some(message),
+            mount_plan: Vec::new(),
+            can_apply_mounts: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerMount {
+    pub package_name: String,
+    pub host_path: String,
+    pub container_path: String,
 }
 
 #[derive(Debug, Serialize)]

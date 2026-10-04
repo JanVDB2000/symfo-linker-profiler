@@ -47,6 +47,7 @@ export const useWorkspace = defineStore('workspace', () => {
   const statusBusy = ref(false)
   // Package currently being switched; empty when idle. Guards against a second click.
   const swapping = ref('')
+  const mutationBlocked = ref(false)
   const swapError = ref<Message | string>('')
   // Container inspection is explicit, never polled: it runs compose config plus
   // one exec per linked package.
@@ -98,6 +99,7 @@ export const useWorkspace = defineStore('workspace', () => {
       }
       scannedAt.value = Date.now()
       fromCache.value = false
+      mutationBlocked.value = false
       result.value = devFixture
       root.value = devFixture.developmentRoot
       if (!devFixture.projects.some(p => p.id === selectedId.value)) selectedId.value = devFixture.projects[0]?.id ?? ''
@@ -119,6 +121,7 @@ export const useWorkspace = defineStore('workspace', () => {
       const next = await invoke<ScanResult>('scan_projects', { developmentRoot: root.value.trim() })
       scannedAt.value = Date.now()
       fromCache.value = false
+      mutationBlocked.value = false
       result.value = next
       root.value = next.developmentRoot
       resetLiveState()
@@ -129,8 +132,15 @@ export const useWorkspace = defineStore('workspace', () => {
       }
       localStorage.setItem('symfolinker.root', next.developmentRoot)
       if (!next.projects.some(p => p.id === selectedId.value)) selectedId.value = next.projects[0]?.id ?? ''
+      swapError.value = ''
     } catch (cause) {
-      forgetScan()
+      if (result.value?.developmentRoot === root.value.trim()) {
+        fromCache.value = true
+        mutationBlocked.value = true
+        resetLiveState()
+        stopPolling()
+        clearScan()
+      } else { forgetScan() }
       error.value = isMessage(cause) ? cause : { key: 'Scanning failed. Check the selected path and read permissions.' }
     } finally { busy.value = false }
   }
@@ -176,8 +186,32 @@ export const useWorkspace = defineStore('workspace', () => {
     writeProfiles(profiles.value)
   }
 
+  async function refreshAfterSwapError() {
+    const developmentRoot = result.value?.developmentRoot
+    if (!isTauri() || !developmentRoot) return
+    try {
+      const next = await invoke<ScanResult>('scan_projects', { developmentRoot })
+      if (root.value !== developmentRoot) return
+      scannedAt.value = Date.now()
+      fromCache.value = false
+      mutationBlocked.value = false
+      result.value = next
+      resetLiveState()
+      if (!next.projects.some(project => project.id === selectedId.value)) selectedId.value = next.projects[0]?.id ?? ''
+      void refreshStatus()
+    } catch {
+      // Keep the workspace visible if refreshing fails; label it stale and require
+      // a successful refresh before further filesystem mutations.
+      fromCache.value = true
+      mutationBlocked.value = true
+      resetLiveState()
+      stopPolling()
+      clearScan()
+    }
+  }
+
   async function applyProfile(profile: LinkProfile) {
-    if (busy.value || swapping.value || profile.root !== result.value?.developmentRoot || root.value !== profile.root) return
+    if (busy.value || swapping.value || mutationBlocked.value || profile.root !== result.value?.developmentRoot || root.value !== profile.root) return
     swapping.value = profile.name
     swapError.value = ''
     try {
@@ -185,18 +219,19 @@ export const useWorkspace = defineStore('workspace', () => {
       const next = await invoke<ScanResult>('apply_profile', { developmentRoot: profile.root, entries: profile.entries })
       scannedAt.value = Date.now()
       fromCache.value = false
+      mutationBlocked.value = false
       result.value = next
       resetLiveState()
       void refreshStatus()
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
-      forgetScan()
+      await refreshAfterSwapError()
     } finally { swapping.value = '' }
   }
 
   async function recoverProject() {
     const project = selected.value
-    if (!project || busy.value || swapping.value || root.value !== result.value?.developmentRoot) return
+    if (!project || busy.value || swapping.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
     swapping.value = 'recovery'
     swapError.value = ''
     try {
@@ -204,17 +239,18 @@ export const useWorkspace = defineStore('workspace', () => {
       const next = await invoke<ScanResult>('recover_project', { developmentRoot: result.value!.developmentRoot, projectId: project.id })
       scannedAt.value = Date.now()
       fromCache.value = false
+      mutationBlocked.value = false
       result.value = next
       resetLiveState()
       void refreshStatus()
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
-      forgetScan()
+      await refreshAfterSwapError()
     } finally { swapping.value = '' }
   }
 
   // Mirror every replacement of the scan, so what is on screen is what a restart restores.
-  watch(result, current => current ? writeScan(current, scannedAt.value) : clearScan())
+  watch(result, current => current && !mutationBlocked.value ? writeScan(current, scannedAt.value) : clearScan())
   watch(selectedId, id => writeSelected(id))
 
   // Replace project Git state immutably so the sidebar, metrics and table update together.
@@ -232,7 +268,7 @@ export const useWorkspace = defineStore('workspace', () => {
   /// interface changes until the command returns a fresh scan.
   async function setMode(pkg: PackageStatus, target: 'local' | 'vendor') {
     const project = selected.value
-    if (!project || swapping.value || busy.value || root.value !== result.value?.developmentRoot) return
+    if (!project || swapping.value || busy.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
     swapping.value = pkg.packageName
     swapError.value = ''
     try {
@@ -240,14 +276,13 @@ export const useWorkspace = defineStore('workspace', () => {
       if (!next) return
       scannedAt.value = Date.now()
       fromCache.value = false
+      mutationBlocked.value = false
       result.value = next
       resetLiveState()
       void refreshStatus()
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
-      // A failed readback or rollback can follow a completed disk mutation. Cached
-      // package modes must never remain actionable after an uncertain outcome.
-      forgetScan()
+      await refreshAfterSwapError()
     } finally { swapping.value = '' }
   }
 
@@ -297,6 +332,26 @@ export const useWorkspace = defineStore('workspace', () => {
     } catch (cause) {
       if (context === contextVersion) containerError.value = isMessage(cause) ? cause : { key: 'The PHP service could not be saved.' }
     } finally { if (context === contextVersion) containerBusy.value = false }
+  }
+
+  async function applyContainerMounts() {
+    const project = selected.value
+    const service = container.value?.phpService
+    if (!project || !service || containerBusy.value || swapping.value || busy.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
+    const context = contextVersion
+    const request = ++containerRequest
+    containerBusy.value = true
+    containerError.value = ''
+    try {
+      if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
+      const report = await invoke<ContainerReport>('apply_container_mounts', { developmentRoot: result.value!.developmentRoot, projectId: project.id, service })
+      if (context !== contextVersion || request !== containerRequest) return
+      container.value = report
+      void refreshStatus()
+    } catch (cause) {
+      if (context !== contextVersion || request !== containerRequest) return
+      containerError.value = isMessage(cause) ? cause : { key: 'The container could not be inspected.' }
+    } finally { if (request === containerRequest) containerBusy.value = false }
   }
 
   let polling: ReturnType<typeof setInterval> | null = null
@@ -370,5 +425,5 @@ export const useWorkspace = defineStore('workspace', () => {
     document.removeEventListener('visibilitychange', visibilityChanged)
   })
 
-  return { canSaveProfile, recoverProject, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan }
+  return { applyContainerMounts, mutationBlocked, canSaveProfile, recoverProject, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan }
 })

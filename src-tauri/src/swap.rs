@@ -1,4 +1,6 @@
-use crate::backup::{require_restorable_backup, restore_vendor, vendor_path, with_vendor_backup};
+use crate::backup::{
+    require_restorable_backup, restore_vendor, vendor_path, with_current_vendor_backup,
+};
 use crate::errors::SymfoLinkerError;
 use crate::links::{create_link, remove_link, require_removable_link, LinkKind};
 use crate::lock::RootLock;
@@ -28,7 +30,7 @@ pub fn activate_local(
     }
 
     let vendor = vendor_path(project, package);
-    with_vendor_backup(lock, guard, project, package, |_backup| {
+    with_current_vendor_backup(lock, guard, project, package, |_backup| {
         create_link(guard, project, &vendor, local_project)
     })
 }

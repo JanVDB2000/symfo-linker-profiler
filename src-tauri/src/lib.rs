@@ -4,6 +4,7 @@ pub mod backup;
 pub mod compose;
 pub mod config;
 pub mod container;
+pub mod container_mounts;
 pub mod discovery;
 pub mod engine;
 pub mod errors;
@@ -144,10 +145,29 @@ pub fn run() {
             inspect_container,
             set_php_service,
             apply_profile,
-            recover_project
+            recover_project,
+            apply_container_mounts
         ])
         .run(tauri::generate_context!())
         .expect("SymfoLinker could not be started");
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn apply_container_mounts(
+    development_root: String,
+    project_id: String,
+    service: String,
+) -> Result<models::ContainerReport, models::Message> {
+    tauri::async_runtime::spawn_blocking(move || {
+        container::apply_mounts(
+            std::path::Path::new(&development_root),
+            &project_id,
+            &service,
+        )
+    })
+    .await
+    .map_err(|_| models::Message::new("The container could not be inspected."))?
 }
 
 #[cfg(feature = "desktop")]

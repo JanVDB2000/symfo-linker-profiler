@@ -36,19 +36,19 @@ const workspaceUrl = dataModule(transpile(read('src/stores/workspace.ts')
 const { useWorkspace } = await import(workspaceUrl)
 const { readScan } = await import(scanCacheUrl)
 
-const ROOT = 'D:\dev'
+const ROOT = 'D:/dev'
 const git = { branch: 'main', commit: 'abc1234', dirty: false, changedFiles: 0 }
 const pkg = {
   packageName: 'acme/bundle', constraint: '^1.0', dependencyType: 'require',
-  localProjectId: 'bundle', localPath: `${ROOT}\bundle`, vendorPath: `${ROOT}\shop\vendor\acme\bundle`,
-  backupPath: `${ROOT}\shop\vendor\acme\bundle.symfolinker-backup`,
+  localProjectId: 'bundle', localPath: `${ROOT}/bundle`, vendorPath: `${ROOT}/shop/vendor/acme/bundle`,
+  backupPath: `${ROOT}/shop/vendor/.symfolinker/acme/bundle`,
   mode: 'local', linkStatus: 'linked', backupStatus: 'available', git,
 }
 const scanResult = () => ({
   developmentRoot: ROOT,
   projects: [
-    { id: 'shop', name: 'shop', composerName: 'acme/shop', path: `${ROOT}\shop`, git, composeFile: null, packages: [pkg] },
-    { id: 'bundle', name: 'bundle', composerName: 'acme/bundle', path: `${ROOT}\bundle`, git, composeFile: null, packages: [] },
+    { id: 'shop', name: 'shop', composerName: 'acme/shop', path: `${ROOT}/shop`, git, composeFile: null, packages: [pkg] },
+    { id: 'bundle', name: 'bundle', composerName: 'acme/bundle', path: `${ROOT}/bundle`, git, composeFile: null, packages: [] },
   ],
   warnings: [{ key: '{path} is unreadable; package statuses may be incomplete.', params: { path: ROOT } }],
 })
@@ -220,7 +220,7 @@ test('a service save failure is shown in the container panel', async () => {
   assert.equal(workspace.containerBusy, false)
 })
 
-test('an uncertain swap result clears the scan and cache while retaining the error', async () => {
+test('an uncertain swap with failed refresh keeps the workspace visible and blocks further mutations', async () => {
   const workspace = reopen()
   await storeScan(workspace, scanResult())
   workspace.selectedId = 'shop'
@@ -228,7 +228,9 @@ test('an uncertain swap result clears the scan and cache while retaining the err
   globalThis.__invoke = async () => { throw { key: 'The switch succeeded, but the workspace could not be read back. Rescan to continue.' } }
   await workspace.setMode(pkg, 'vendor')
   await nextTick()
-  assert.equal(workspace.result, null)
+  assert.equal(workspace.selectedId, 'shop')
+  assert.equal(workspace.result.projects.length, 2)
+  assert.equal(workspace.mutationBlocked, true)
   assert.equal(storage.has('symfolinker.scan'), false)
   assert.match(workspace.swapError.key, /switch succeeded/)
 })
@@ -261,4 +263,48 @@ test('successful scans remember workspaces and opening another workspace clears 
   assert.equal(workspace.savedWorkspaces.length, 2)
   workspace.removeWorkspace(ROOT)
   assert.equal(reopen().savedWorkspaces.length, 1)
+})
+
+
+test('a refused swap refreshes package modes without losing the selected workspace', async () => {
+  const workspace = reopen()
+  await storeScan(workspace, scanResult())
+  workspace.selectedId = 'shop'
+  globalThis.__desktop = true
+  const calls = []
+  const next = scanResult()
+  next.projects[0].packages = [{ ...pkg, mode: 'vendor', linkStatus: 'notLinked' }]
+  globalThis.__invoke = async command => {
+    calls.push(command)
+    if (command === 'activate_local') throw { key: 'A backup already exists at {path}. SymfoLinker will not overwrite it.', params: { path: pkg.backupPath } }
+    if (command === 'scan_projects') return next
+    return liveStatus('main')
+  }
+  await workspace.setMode(pkg, 'local')
+  assert.equal(workspace.selectedId, 'shop')
+  assert.equal(workspace.selected.packages[0].mode, 'vendor')
+  assert.equal(workspace.mutationBlocked, false)
+  assert.deepEqual(calls.slice(0,2), ['activate_local', 'scan_projects'])
+  assert.match(workspace.swapError.key, /backup already exists/)
+})
+
+test('container mount application is scoped to the chosen service and keeps the workspace on failure', async () => {
+  const workspace = reopen()
+  await storeScan(workspace, scanResult())
+  workspace.selectedId = 'shop'
+  workspace.container = { phpService: 'php-fpm' }
+  globalThis.__desktop = true
+  let request
+  globalThis.__invoke = async (command, args) => {
+    request = { command, args }
+    throw { key: 'The container could not be inspected.' }
+  }
+  await workspace.applyContainerMounts()
+  assert.equal(request.command, 'apply_container_mounts')
+  assert.equal(request.args.projectId, 'shop')
+  assert.equal(request.args.service, 'php-fpm')
+  assert.equal(workspace.selectedId, 'shop')
+  assert.equal(workspace.result.projects.length, 2)
+  assert.equal(workspace.containerBusy, false)
+  assert.equal(workspace.containerError.key, 'The container could not be inspected.')
 })

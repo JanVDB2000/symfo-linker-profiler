@@ -66,7 +66,7 @@ test('all four catalogs have identical keys and interpolation parameters', () =>
 })
 
 test('all literal frontend and backend message keys exist in the catalogs', () => {
-  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/lib.rs']) {
+  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/container.rs', 'src-tauri/src/lib.rs']) {
     const source = read(path)
     const patterns = [ /\bt\('((?:\\.|[^'\\])*)'/g, /key: '((?:\\.|[^'\\])*)'/g, /Message::(?:new|with)\(\s*"((?:\\.|[^"\\])*)"/g ]
     for (const pattern of patterns) for (const match of source.matchAll(pattern)) {
