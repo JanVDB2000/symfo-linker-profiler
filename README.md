@@ -82,13 +82,30 @@ Paths from projects are untrusted input. The scanner canonicalizes the root, ign
 
 ### Requirements
 
-| Component | Version / explanation |
+| Component | Requirement |
 | --- | --- |
 | Node.js | 22.12+ (or 20.19+) with npm; translation tests require Node.js 22.12+ |
-| Rust | 1.87+ (see [Version pinning](#version-pinning)) |
+| Rust | 1.87+, installed through [rustup](https://rustup.rs). Not optional: the backend is Rust, so `npm run build` alone will not produce a working app. See [Version pinning](#version-pinning). |
 | Git | Required for branch and status information; otherwise that information is unavailable |
-| Platform | See the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) |
+| Linux | WebKitGTK and friends, see below |
+| macOS | Xcode Command Line Tools (`xcode-select --install`) |
 | Windows | MSVC C++ build tools and WebView2 |
+
+Tauri renders through the operating system's own webview, so the desktop build needs that webview's development headers. Everything below is a one-time setup per machine.
+
+**Linux (Debian/Ubuntu)**
+
+```bash
+sudo apt update
+sudo apt install build-essential libwebkit2gtk-4.1-dev libxdo-dev   libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+That last line matters: `rustup` adds `cargo` to your `PATH` only for new shells, so without it the terminal you are in still cannot find `cargo`. Add `patchelf` as well if you enable bundling later.
+
+For Fedora, Arch and other distributions, see the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ### Install and run
 
@@ -98,6 +115,17 @@ npm run desktop
 ```
 
 `npm run desktop` starts Vite at `127.0.0.1:1420` and builds the Tauri shell with the `desktop` feature. `npm run dev` runs only the frontend in the browser, where development fixtures demonstrate the interface. Use `?empty` for the initial empty state and `?error` for a simulated scan failure. Production browser builds never present fixture data as real scans; local scanning requires the desktop app.
+
+### Build troubleshooting
+
+The messages below are the ones that actually come up on a fresh machine. The first two are real failures; the last two are noise that can be ignored.
+
+| What you see | What it means |
+| --- | --- |
+| `failed to run \`cargo metadata\` ... No such file or directory (os error 2)` | Rust is not installed, or `cargo` is not on the `PATH` of this shell. The path is missing, not the file. Install rustup, then run `source "$HOME/.cargo/env"` or open a new terminal. |
+| `failed to run custom build command for 'glib-sys'`, or pkg-config errors naming `webkit2gtk`, `javascriptcoregtk` or `soup` | The Linux system libraries above are missing. Install them and build again. |
+| `npm warn install-scripts ... esbuild@0.28.2 (postinstall: node install.js)` | Harmless. esbuild ships its binary as a platform-specific optional dependency, so the postinstall has nothing left to do and npm's script approval is not needed. Approving it is not recommended for a dependency that does not need it. |
+| `WARNING: Glycin running without additional sandbox inside snap confinement.` | Harmless, and not from this app. It appears when the terminal itself runs inside a snap (a snap-installed IDE, for example) and an image library notices it cannot nest its sandbox. Running from a normal terminal makes it disappear. |
 
 ### Version pinning
 
@@ -118,6 +146,7 @@ Moving to Tauri 2.12 is a single coordinated change: install Rust 1.90 (`rustup 
 | --- | --- |
 | `npm run desktop` | Desktop app in development (`tauri dev --features desktop`). |
 | `npm run desktop:build` | Build the desktop application with the `desktop` feature. |
+| `npm run desktop` / `desktop:build` / `check:native` | Each runs `scripts/check-prerequisites.mjs` first, so a missing Rust toolchain or missing WebKitGTK headers produce a readable message instead of a `cargo metadata` error. |
 | `npm run tauri` | Raw Tauri CLI passthrough. Note that `npm run tauri build` leaves out the `desktop` feature, so Cargo matches no binary target and no executable is produced; use `npm run desktop:build`. |
 | `npm run dev` | Frontend on port 1420 (`strictPort`). |
 | `npm run build` | Typecheck with `vue-tsc --noEmit`, then build production assets into `dist/`. |
@@ -444,8 +473,8 @@ Translation tests check catalog keys and placeholders, interpolation of dynamic 
 | *…: multiple local projects found* | Two projects share a Composer name; make the names unique. |
 | *Invalid path* | A vendor path or ancestor is a link or is not a directory. |
 | *No Git information* | The project has no `.git`, or Git is missing from `PATH`. |
-| *Docker is unavailable. Is Docker Desktop running?* | The Docker daemon did not respond. Container status is unknown until it does. |
-| *Docker CLI not found. Is docker in PATH?* | The `docker` executable is not on `PATH` for the app process. |
+| *{engine} is unavailable. Is it running?* | The Docker or Podman daemon did not respond. Container status is unknown until it does. |
+| *No container engine found. Is docker or podman in PATH?* | Neither executable is on the `PATH` of the app process. |
 | *No containers have been created for this Compose project.* | A Compose file exists, but `docker compose up` has not run yet. |
 
 ## Roadmap

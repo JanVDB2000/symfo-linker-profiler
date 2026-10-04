@@ -28,9 +28,12 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "predesktop": "node scripts/check-prerequisites.mjs",
     "desktop": "tauri dev --features desktop",
+    "predesktop:build": "node scripts/check-prerequisites.mjs",
     "desktop:build": "tauri build --features desktop",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
+    "precheck:native": "node scripts/check-prerequisites.mjs",
     "check:native": "cargo check --manifest-path src-tauri/Cargo.toml --features desktop",
     "format:check": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
     "test:i18n": "node --test --experimental-test-isolation=none tests/i18n.test.mjs"
