@@ -7,6 +7,9 @@
 
 SymfoLinker is a local desktop app for PHP developers who work on a package and the application that consumes it at the same time. It scans the projects under one development root, finds dependencies that also exist as a local checkout, and switches them between the Composer version and that checkout, without editing `composer.json` and without ever deleting the original package.
 
+<img width="1262" height="916" alt="image" src="https://github.com/user-attachments/assets/6fa258f5-12ea-47b8-b294-0c95f2902dec" />
+
+
 **Contents:** [Download](#download) · [The problem](#the-problem) · [What it does](#what-it-does) · [Safety model](#safety-model) · [Getting started](#getting-started) · [Development root](#the-development-root) · [Interface](#the-interface) · [Languages](#languages) · [Scan rules](#scan-rules) · [Status values](#status-values) · [Data contract](#data-contract-ipc) · [Project structure](#project-structure) · [Verification](#verification) · [Messages](#common-messages) · [Roadmap](#roadmap) · [License](#license)
 
 ## Download
