@@ -7,7 +7,29 @@
 
 SymfoLinker is a local desktop app for PHP developers who work on a package and the application that consumes it at the same time. It scans the projects under one development root, finds dependencies that also exist as a local checkout, and switches them between the Composer version and that checkout, without editing `composer.json` and without ever deleting the original package.
 
-**Contents:** [The problem](#the-problem) · [What it does](#what-it-does) · [Safety model](#safety-model) · [Getting started](#getting-started) · [Development root](#the-development-root) · [Interface](#the-interface) · [Languages](#languages) · [Scan rules](#scan-rules) · [Status values](#status-values) · [Data contract](#data-contract-ipc) · [Project structure](#project-structure) · [Verification](#verification) · [Messages](#common-messages) · [Roadmap](#roadmap) · [License](#license)
+**Contents:** [Download](#download) · [The problem](#the-problem) · [What it does](#what-it-does) · [Safety model](#safety-model) · [Getting started](#getting-started) · [Development root](#the-development-root) · [Interface](#the-interface) · [Languages](#languages) · [Scan rules](#scan-rules) · [Status values](#status-values) · [Data contract](#data-contract-ipc) · [Project structure](#project-structure) · [Verification](#verification) · [Messages](#common-messages) · [Roadmap](#roadmap) · [License](#license)
+
+## Download
+
+Most people do not need this repository. Grab an installer from the [latest release](https://github.com/JanVDB2000/symfo-linker-profiler/releases/latest) instead:
+
+| Platform | File |
+| --- | --- |
+| Windows | `.msi` or `.exe` setup |
+| macOS | `.dmg` (separate builds for Apple silicon and Intel) |
+| Linux | `.AppImage` (runs anywhere) or `.deb` (Debian/Ubuntu) |
+
+The rest of this README is for building from source, which you only need if you want to modify SymfoLinker.
+
+### These builds are not signed
+
+Code signing certificates cost money per year, so the releases are unsigned. Your operating system will say so, and that warning is accurate: it means nobody has paid to vouch for the binary, not that the binary has been checked and found bad.
+
+- **Windows** shows "Windows protected your PC". Choose *More info*, then *Run anyway*.
+- **macOS** says the app "cannot be opened because the developer cannot be verified". Right-click the app, choose *Open*, then confirm; or run `xattr -dr com.apple.quarantine /Applications/SymfoLinker.app`.
+- **Linux** AppImages need the executable bit: `chmod +x SymfoLinker_*.AppImage`.
+
+If you would rather not trust an unsigned binary, building from source is the alternative, and every release is built from this repository by [the release workflow](.github/workflows/release.yml).
 
 ## The problem
 
@@ -49,7 +71,6 @@ Every milestone in [the implementation plan](docs/SymfoLinker-implementation-pla
 - A backup is recognised as a directory; its ownership and staleness are not yet validated.
 - The health check reports readability and path status, not write permissions.
 - No link registry is kept. The filesystem is the only source of truth, re-read after every switch.
-- Installers are not built; `bundle.active` is `false` in `tauri.conf.json`, so a build produces the executable only.
 
 ### What it writes, and where
 
@@ -145,7 +166,7 @@ Moving to Tauri 2.12 is a single coordinated change: install Rust 1.90 (`rustup 
 | Script | Purpose |
 | --- | --- |
 | `npm run desktop` | Desktop app in development (`tauri dev --features desktop`). |
-| `npm run desktop:build` | Build the desktop application with the `desktop` feature. |
+| `npm run desktop:build` | Build the desktop application with the `desktop` feature, including installers. |
 | `npm run desktop` / `desktop:build` / `check:native` | Each runs `scripts/check-prerequisites.mjs` first, so a missing Rust toolchain or missing WebKitGTK headers produce a readable message instead of a `cargo metadata` error. |
 | `npm run tauri` | Raw Tauri CLI passthrough. Note that `npm run tauri build` leaves out the `desktop` feature, so Cargo matches no binary target and no executable is produced; use `npm run desktop:build`. |
 | `npm run dev` | Frontend on port 1420 (`strictPort`). |
@@ -479,7 +500,7 @@ Translation tests check catalog keys and placeholders, interpolation of dynamic 
 
 ## Roadmap
 
-Every milestone in this plan is implemented. What remains is not on the roadmap: a state file is still not written, backup ownership and stale backups are not yet validated, and no installer is built.
+Every milestone in this plan is implemented. What remains is not on the roadmap: a state file is still not written, backup ownership and stale backups are not yet validated, and the released installers are unsigned.
 
 | # | Milestone | Contents |
 | --- | --- | --- |
@@ -493,6 +514,19 @@ Every milestone in this plan is implemented. What remains is not on the roadmap:
 ### Definition of Done for v0.1
 
 Projects are discovered automatically; dependencies map to local repositories; branch and dirty status are visible; local/vendor mode is detected correctly; the original vendor directory is always preserved; local symlinks are relative; restoration works without Composer; failed swaps roll back automatically; no writes outside `vendor/` are possible within projects; app state lives only above the projects; Docker/PHP-FPM validation works for normal bind mounts; users can switch through the GUI; active links across all projects are visible.
+
+## Releasing
+
+Installers are built by [`.github/workflows/release.yml`](.github/workflows/release.yml), never by hand: each platform has to build on its own runner because an installer embeds that operating system's webview and native libraries.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+That builds Windows, Linux, and both macOS architectures, then opens a **draft** release with the artifacts attached, so it can be checked before anyone can download it. Publish the draft to make it live.
+
+Bump `version` in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` to match the tag before tagging.
 
 ## Contributing
 

@@ -1,0 +1,85 @@
+name: Release
+
+# Push a version tag to produce installers, for example:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Each platform must build on its own runner: an installer embeds the system
+# webview and native libraries of the OS it was built on, so these cannot be
+# cross-compiled from a single machine.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple silicon and Intel are separate binaries.
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          # Deliberately not ubuntu-latest: a binary built against a newer glibc
+          # refuses to start on older distributions, and the point of a release
+          # is that it runs on machines other than the build machine.
+          - platform: ubuntu-22.04
+            args: ''
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.87'
+          targets: ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.args }}
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SymfoLinker ${{ github.ref_name }}
+          releaseBody: |
+            Download the installer for your platform below.
+
+            These builds are not code signed, so Windows SmartScreen and macOS
+            Gatekeeper will warn on first run. See "Download" in the README.
+          # Published as a draft so the release can be checked before it goes public.
+          releaseDraft: true
+          prerelease: false
+          # The Tauri dependencies sit behind an optional feature, so without
+          # this flag Cargo matches no binary target and nothing is bundled.
+          args: ${{ matrix.args }} --features desktop
