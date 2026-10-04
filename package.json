@@ -1,6 +1,6 @@
 {
   "name": "symfolinker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop app to switch Composer dependencies between the vendor version and a local checkout, without touching project configuration.",
   "license": "MIT",
   "repository": {

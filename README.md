@@ -46,7 +46,7 @@ Switching manually means using `rm -rf` inside `vendor/`, running `composer inst
 
 ## What it does
 
-Every milestone in [the implementation plan](docs/SymfoLinker-implementation-plan.md) is implemented. Built with Tauri 2, Vue 3, TypeScript, Pinia and Rust; version `0.1.0`.
+Every milestone in [the implementation plan](docs/SymfoLinker-implementation-plan.md) is implemented. Built with Tauri 2, Vue 3, TypeScript, Pinia and Rust; version `0.2.0`.
 
 **Discover**
 
@@ -548,8 +548,8 @@ Projects are discovered automatically; dependencies map to local repositories; b
 Installers are built by [`.github/workflows/release.yml`](.github/workflows/release.yml), never by hand: each platform has to build on its own runner because an installer embeds that operating system's webview and native libraries.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 That builds Windows, Linux, and both macOS architectures, then opens a **draft** release with the artifacts attached, so it can be checked before anyone can download it. Publish the draft to make it live.
