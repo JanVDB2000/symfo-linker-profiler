@@ -17,7 +17,9 @@ Most people do not need this repository. Grab an installer from the [latest rele
 | --- | --- |
 | Windows | `.msi` or `.exe` setup |
 | macOS | `.dmg` (separate builds for Apple silicon and Intel) |
-| Linux | `.AppImage` (runs anywhere) or `.deb` (Debian/Ubuntu) |
+| Linux | `.AppImage` (runs anywhere, larger because it carries its own webview), `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/RHEL) |
+
+Releases also contain `SymfoLinker_*.app.tar.gz`. Those are macOS update bundles, not downloads: use the `.dmg`.
 
 The rest of this README is for building from source, which you only need if you want to modify SymfoLinker.
 
