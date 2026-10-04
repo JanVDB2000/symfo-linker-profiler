@@ -1,0 +1,51 @@
+{
+  "name": "symfolinker",
+  "version": "0.1.0",
+  "description": "Desktop app to switch Composer dependencies between the vendor version and a local checkout, without touching project configuration.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JanVDB2000/symfo-linker-profiler.git"
+  },
+  "homepage": "https://github.com/JanVDB2000/symfo-linker-profiler#readme",
+  "bugs": {
+    "url": "https://github.com/JanVDB2000/symfo-linker-profiler/issues"
+  },
+  "keywords": [
+    "composer",
+    "php",
+    "symfony",
+    "symlink",
+    "tauri",
+    "vue",
+    "monorepo",
+    "developer-tools"
+  ],
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "desktop": "tauri dev --features desktop",
+    "desktop:build": "tauri build --features desktop",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
+    "check:native": "cargo check --manifest-path src-tauri/Cargo.toml --features desktop",
+    "format:check": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
+    "test:i18n": "node --test --experimental-test-isolation=none tests/i18n.test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.11.1",
+    "@tauri-apps/plugin-dialog": "~2.7.3",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.0",
+    "vite": "^7.0.0",
+    "vue-tsc": "^3.0.0"
+  }
+}

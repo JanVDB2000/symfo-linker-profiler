@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.idea/
+*.log
+.cache/
+.codex
+.claude
+.mcp.json
+.DS_Store

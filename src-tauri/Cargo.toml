@@ -1,0 +1,35 @@
+[package]
+name = "symfolinker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Switch Composer dependencies between the vendor version and a local checkout"
+license = "MIT"
+repository = "https://github.com/JanVDB2000/symfo-linker-profiler"
+
+[lib]
+name = "symfolinker_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "symfolinker"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = []
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
+
+[dependencies]
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+pathdiff = "0.2.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", optional = true , features = [] }
+tauri-plugin-dialog = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }
+
+[target."cfg(windows)".dependencies]
+junction = "2.1.0"

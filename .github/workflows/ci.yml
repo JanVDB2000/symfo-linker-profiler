@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The library and frontend build without Tauri, so every platform is cheap to
+  # cover. That matters here: creating a symlink needs Developer Mode on Windows,
+  # so the symlink path is only exercised on Linux and macOS, while Windows covers
+  # the junction fallback.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Pinned to the declared MSRV so rust-version in Cargo.toml stays honest.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.87'
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Typecheck and build frontend
+        run: npm run build
+
+      - name: Rust tests
+        run: npm test
+
+      - name: Translation tests
+        run: npm run test:i18n
+
+      - name: Formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features -- -D warnings
+
+  # The desktop feature pulls in Tauri and needs system libraries, so it is checked
+  # once rather than on every platform.
+  desktop:
+    name: Desktop feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.87'
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: desktop
+
+      - name: Clippy with the desktop feature
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features desktop -- -D warnings
