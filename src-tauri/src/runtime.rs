@@ -1,8 +1,16 @@
 use crate::discovery::{compose_file, display, inspect_git};
 use crate::engine;
 use crate::models::{ComposeService, DockerStatus, Message, ProjectStatus};
+use crate::process::{output_within, CommandError};
 use serde::Deserialize;
-use std::{path::Path, process::Command};
+use std::{path::Path, process::Command, time::Duration};
+
+/// Detection runs on every cold status check, so it may not stall the interface.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Compose commands read files and talk to the daemon, so they get more room. The
+/// bound exists for the engine that stops answering altogether, not for a slow one.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Rij zoals `docker compose ps --format json` die schrijft (PascalCase velden).
 #[derive(Debug, Deserialize)]
@@ -96,13 +104,12 @@ fn engine_command(binary: &str, dir: Option<&Path>, args: &[&str]) -> Command {
 
 /// Whether this engine binary exists and its daemon answers. Used for detection.
 pub(crate) fn engine_responds(binary: &str) -> bool {
-    engine_command(
+    let command = engine_command(
         binary,
         None,
         &["version", "--format", "{{.Server.Version}}"],
-    )
-    .output()
-    .is_ok_and(|output| output.status.success())
+    );
+    output_within(command, PROBE_TIMEOUT).is_ok_and(|output| output.status.success())
 }
 
 /// Runs a compose subcommand on whichever engine is installed; errors stay translatable.
@@ -115,15 +122,32 @@ pub(crate) fn container_output(dir: &Path, args: &[&str]) -> Result<String, Mess
             "No container engine found. Is docker or podman in PATH?",
         ));
     };
-    let output = engine_command(engine.binary(), Some(dir), args)
-        .output()
-        .map_err(|_| {
-            Message::with(
-                "{engine} CLI not found. Is it in PATH?",
+    let command = engine_command(engine.binary(), Some(dir), args);
+    let output = output_within(command, COMMAND_TIMEOUT).map_err(|failure| match failure {
+        CommandError::NotStarted => Message::with(
+            "{engine} CLI not found. Is it in PATH?",
+            "engine",
+            engine.label(),
+        ),
+        // Named separately from a plain failure: a hung engine looks like a broken
+        // project otherwise, and the two call for completely different actions.
+        CommandError::TimedOut => {
+            let mut message = Message::with(
+                "{engine} did not answer within {seconds} seconds.",
                 "engine",
                 engine.label(),
-            )
-        })?;
+            );
+            message
+                .params
+                .insert("seconds".to_owned(), COMMAND_TIMEOUT.as_secs().to_string());
+            message
+        }
+        CommandError::Interrupted => Message::with(
+            "{engine} returned an unknown error.",
+            "engine",
+            engine.label(),
+        ),
+    })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }

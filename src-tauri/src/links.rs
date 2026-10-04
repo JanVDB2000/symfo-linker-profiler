@@ -89,8 +89,11 @@ pub fn create_link(
     platform_link(vendor, &relative, local_project)
 }
 
-/// Removes the link itself. Never touches what it points at.
-pub fn remove_link(
+/// Checks that `vendor` holds a link this app may remove, without removing it.
+///
+/// Separate from `remove_link` so a caller with more work ahead of it can refuse while
+/// everything is still in place, and refuse with exactly the same wording.
+pub fn require_removable_link(
     guard: &WriteGuard,
     project: &Path,
     vendor: &Path,
@@ -106,6 +109,16 @@ pub fn remove_link(
             path: vendor.to_string_lossy().into_owned(),
         });
     }
+    Ok(())
+}
+
+/// Removes the link itself. Never touches what it points at.
+pub fn remove_link(
+    guard: &WriteGuard,
+    project: &Path,
+    vendor: &Path,
+) -> Result<(), SymfoLinkerError> {
+    require_removable_link(guard, project, vendor)?;
     remove_platform_link(vendor)
 }
 

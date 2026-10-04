@@ -12,7 +12,7 @@ export interface PackageStatus {
   backupPath: string
   mode: PackageMode
   linkStatus: 'notLinked' | 'linked' | 'broken' | 'unexpectedTarget' | 'missing' | 'invalid'
-  backupStatus: 'missing' | 'available' | 'invalid'
+  backupStatus: 'missing' | 'available' | 'invalid' | 'interrupted' | 'unrecognized' | 'lost'
   git: GitInfo | null
 }
 export interface Project {

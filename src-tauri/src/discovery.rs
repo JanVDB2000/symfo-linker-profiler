@@ -1,3 +1,5 @@
+use crate::backup;
+use crate::journal;
 use crate::models::{GitInfo, Message, PackageStatus, Project, ScanResult};
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
@@ -127,6 +129,26 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
         }
     }
     for i in 0..found.len() {
+        // Read once per project rather than once per package: it is a single file
+        // describing all of them, and the scan already walks every requirement.
+        let journal = match journal::read_checked(&found[i].2) {
+            Ok(records) => records,
+            Err(_) => {
+                warnings.push(Message::with("{name}: backup journal is invalid or unreadable. Recovery requires a valid journal.", "name", found[i].0.name.clone()));
+                journal::Journal::new()
+            }
+        };
+        for (package, record) in &journal {
+            if record.state != journal::SwapState::Linked {
+                let mut warning = Message::with(
+                    "{name}: interrupted operation for {package}. Use Health to recover.",
+                    "name",
+                    found[i].0.name.clone(),
+                );
+                warning.params.insert("package".to_owned(), package.clone());
+                warnings.push(warning);
+            }
+        }
         let mut packages = Vec::new();
         for (kind, requirements) in [
             ("require", &found[i].1.require),
@@ -152,7 +174,15 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
                     ("unknown", "invalid")
                 };
                 let backup_status = if safe {
-                    inspect_backup(&backup_path)
+                    match journal.get(name) {
+                        Some(record)
+                            if record.package != *name
+                                || Path::new(&record.project) != found[i].2 =>
+                        {
+                            "invalid"
+                        }
+                        record => backup::backup_status(&backup_path, record),
+                    }
                 } else {
                     "invalid"
                 };
@@ -247,15 +277,6 @@ fn inspect_package(vendor: &Path, local: &Path) -> (&'static str, &'static str) 
         Ok(_) => ("unknown", "invalid"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("unknown", "missing"),
         Err(_) => ("unknown", "invalid"),
-    }
-}
-
-fn inspect_backup(path: &Path) -> &'static str {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !is_link(&meta) => "available",
-        Ok(_) => "invalid",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
-        Err(_) => "invalid",
     }
 }
 

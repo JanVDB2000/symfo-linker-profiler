@@ -171,6 +171,15 @@ tbody tr:last-child > * { border-bottom: 0; }
 .live { display: inline-flex; align-items: center; gap: 6px; align-self: center; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--muted); background: var(--page); box-shadow: inset 0 0 0 1px var(--border); white-space: nowrap; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
 .docker-note { margin-left: 8px; font-size: 13px; }
+/* Scanning indicator: a rotating ring that inherits the colour of its context. */
+.spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; opacity: .65; flex-shrink: 0; vertical-align: -1px; animation: spinner-rotate .7s linear infinite; }
+.spinner-large { width: 28px; height: 28px; border-width: 3px; }
+@keyframes spinner-rotate { to { transform: rotate(1turn); } }
+/* Keep turning, but slowly: the motion is the only sign that work is still running. */
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.scanning-panel .spinner { margin-bottom: 4px; color: var(--link); opacity: 1; }
+.text-button .spinner { margin-right: 5px; }
+.row-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 /* Mode toggle: VENDOR / LOCAL as one segmented control. */
 .mode-switch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .mode-option { font-size: 11px; font-weight: 700; letter-spacing: .02em; padding: 3px 9px; border: 1px solid var(--button-border); background: var(--button); color: var(--muted); border-radius: 4px; }
@@ -197,6 +206,10 @@ tbody tr:last-child > * { border-bottom: 0; }
 .dialog-package { font-family: var(--font-mono); font-size: 14px; color: var(--text); }
 .dialog-path { font-size: 12px; overflow-wrap: anywhere; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.dialog { max-height: calc(100vh - 40px); overflow-y: auto; }
+.dialog li { overflow-wrap: anywhere; }
+.saved-entry { display: flex; margin: 10px 0; }
+.saved-entry .path { overflow-wrap: anywhere; text-align: left; }
 .button-primary { background: var(--summary-border); border-color: var(--summary-border); color: #fff; }
 .text-success { color: var(--success); }
 .text-warning { color: var(--warning); }

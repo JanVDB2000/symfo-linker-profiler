@@ -36,7 +36,8 @@
     "precheck:native": "node scripts/check-prerequisites.mjs",
     "check:native": "cargo check --manifest-path src-tauri/Cargo.toml --features desktop",
     "format:check": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
-    "test:i18n": "node --test --experimental-test-isolation=none tests/i18n.test.mjs"
+    "test:i18n": "node --test --experimental-test-isolation=none tests/i18n.test.mjs",
+    "test:cache": "node --test --experimental-test-isolation=none tests/scan-cache.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11.1",

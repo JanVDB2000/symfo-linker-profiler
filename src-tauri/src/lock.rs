@@ -24,9 +24,23 @@ pub struct RootLock {
 impl RootLock {
     pub fn acquire(development_root: &Path) -> Result<Self, SymfoLinkerError> {
         let directory = development_root.join(".symfolinker");
+        if fs::symlink_metadata(&directory)
+            .is_ok_and(|meta| !meta.is_dir() || crate::discovery::is_link(&meta))
+        {
+            return Err(SymfoLinkerError::WriteDenied {
+                path: directory.to_string_lossy().into_owned(),
+            });
+        }
         fs::create_dir_all(&directory).map_err(|error| SymfoLinkerError::io(&directory, &error))?;
 
         let path = directory.join("lock");
+        if fs::symlink_metadata(&path)
+            .is_ok_and(|meta| crate::discovery::is_link(&meta) || !meta.is_file())
+        {
+            return Err(SymfoLinkerError::WriteDenied {
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)

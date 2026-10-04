@@ -50,6 +50,9 @@ jobs:
       - name: Translation tests
         run: npm run test:i18n
 
+      - name: Cache and interaction tests
+        run: npm run test:cache
+
       - name: Formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 

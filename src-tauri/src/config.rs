@@ -1,4 +1,6 @@
+use crate::atomic::write_atomically;
 use crate::errors::SymfoLinkerError;
+use crate::lock::RootLock;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::Path, path::PathBuf};
 
@@ -44,11 +46,19 @@ pub fn php_service(development_root: &Path, project_path: &str) -> Option<String
 
 /// Stores the PHP service for one project, leaving every other entry untouched.
 /// Passing `None` clears the choice so automatic suggestion takes over again.
+///
+/// Reading, changing and writing the file is one operation, so it runs under the same
+/// development-root lock the swaps take: two writers that each loaded the file first
+/// would otherwise have the last one silently drop the other's choice. The write itself
+/// replaces the file rather than truncating it, so an interrupted save leaves the
+/// previous configuration readable instead of a half-written one.
 pub fn set_php_service(
     development_root: &Path,
     project_path: &str,
     service: Option<String>,
 ) -> Result<(), SymfoLinkerError> {
+    let _lock = RootLock::acquire(development_root)?;
+
     let mut config = load(development_root);
     config
         .projects
@@ -57,12 +67,9 @@ pub fn set_php_service(
         .php_service = service;
 
     let path = config_path(development_root);
-    let directory = path.parent().expect("config path always has a parent");
-    fs::create_dir_all(directory).map_err(|error| SymfoLinkerError::io(directory, &error))?;
-
     let json = serde_json::to_vec_pretty(&config).map_err(|error| SymfoLinkerError::IoError {
         path: path.to_string_lossy().into_owned(),
         detail: error.to_string(),
     })?;
-    fs::write(&path, json).map_err(|error| SymfoLinkerError::io(&path, &error))
+    write_atomically(&path, &json)
 }

@@ -114,7 +114,7 @@ fn rejects_traversal_and_platform_requirements_as_package_names() {
 }
 
 #[test]
-fn reports_backup_directory_and_invalid_vendor_file() {
+fn reports_an_unrecorded_backup_directory_and_an_invalid_vendor_file() {
     let root = Workspace::new();
     let app = root.project("app", r#"{"require":{"acme/bundle":"*"}}"#);
     root.project("bundle", r#"{"name":"acme/bundle"}"#);
@@ -125,7 +125,9 @@ fn reports_backup_directory_and_invalid_vendor_file() {
     let package = &result.projects[0].packages[0];
     assert_eq!(package.mode, "unknown");
     assert_eq!(package.link_status, "invalid");
-    assert_eq!(package.backup_status, "available");
+    // A directory SymfoLinker never recorded: placed by hand, or left behind by a
+    // version that predates the journal. Restorable, but not something to vouch for.
+    assert_eq!(package.backup_status, "unrecognized");
 }
 
 #[test]

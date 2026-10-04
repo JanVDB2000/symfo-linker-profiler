@@ -70,9 +70,9 @@ Every milestone in [the implementation plan](docs/SymfoLinker-implementation-pla
 
 ### Limits worth knowing
 
-- A backup is recognised as a directory; its ownership and staleness are not yet validated.
+- Backups from older versions without a journal are marked **Unrecognized**. They can be restored explicitly, but their provenance cannot be verified.
 - The health check reports readability and path status, not write permissions.
-- No link registry is kept. The filesystem is the only source of truth, re-read after every switch.
+- A recovery journal records the project, package, installed version (when known), timestamp and operation state. Filesystem inspection remains the source of truth for active modes; journal metadata is not a content checksum.
 
 ### What it writes, and where
 
@@ -80,10 +80,24 @@ Projects are read-only outside `vendor/`. SymfoLinker writes in exactly two plac
 
 | Location | Contents |
 | --- | --- |
-| `<project>/vendor/` | The package link, and the preserved Composer directory in `vendor/.symfolinker/`. |
+| `<project>/vendor/` | The package link, preserved Composer directory, recovery journal (`vendor/.symfolinker/state.json`) and temporarily staged restore links. |
 | `<root>/.symfolinker/` | `lock` (one mutation at a time) and `config.json` (the PHP service per project). Above the projects, never inside one. |
 
 The last scanned root, theme, layout width and language are remembered in local webview storage (`localStorage` keys `symfolinker.root`, `symfolinker.theme`, `symfolinker.width` and `symfolinker.language`), rather than in a project file.
+
+The scan result itself is cached there too (`symfolinker.scan`, plus the selected project in `symfolinker.project`), so reopening the app shows the same workspace without walking the filesystem again. The summary bar marks restored data as **Cached** and shows when it was scanned; **Refresh** reads the filesystem anew, and every switch replaces the stored copy with the state the backend read back. The cache belongs to the root it was taken in and is discarded when the root changes, when the entry is unreadable, incomplete or from an older version, when a scan fails, or when **Settings → Saved scan → Clear saved scan** is used. Because the cache describes a moment, not the present, anything live (Git status, containers) is still read on demand.
+
+### Saved workspaces, profiles and recovery
+
+Successful desktop scans automatically add their root to **Settings > Saved workspaces**. Open a saved root to scan it, or remove its shortcut. Shortcuts live in local webview storage (`symfolinker.workspaces`); removing one does not change any project files.
+
+In **Settings > Link profiles**, save all current package modes under a name. Saving requires a fresh scan with no unknown package modes. Profiles are scoped to the development root and stored locally (`symfolinker.profiles`); saving the same name replaces that profile. Applying opens a confirmation listing every project, package and target mode. The backend takes one root lock, resolves the entire profile from a fresh scan and validates it before switching. If a later switch fails, completed changes are reversed in reverse order. Rollback can itself fail on external filesystem changes or I/O errors; the error identifies the affected path, and the interface discards uncertain cached state so a Refresh is required.
+
+**Health > Recover interrupted swaps** reconciles the selected project's journal with disk. A preserved backup at an empty vendor path is restored, even when the local checkout is gone. A broken local link is restored to the preserved Composer package, including when its checkout has disappeared. A completed working local switch is marked complete; a completed vendor restore clears the record and removes any staged link. Conflicting occupied paths are refused. Recovery is explicit: scanning never repairs or writes project files. A malformed journal is reported and preserved rather than overwritten.
+
+Restoring VENDOR first verifies the backup, then stages the original link with a rename. If restoring fails, that exact link is moved back, including a broken symlink or junction. This preserves the local state without having to reconstruct a target that no longer exists. New journal records identify their project and package; legacy unrecorded backups remain visibly unrecognized.
+
+Git and container requests are scoped to the current workspace and project. Late responses from an earlier selection are discarded, and changing projects starts its own status refresh immediately. After an uncertain swap result, cached package modes are cleared and the error stays visible until the workspace is scanned again.
 
 ## Safety model
 
@@ -92,7 +106,7 @@ The hard rules from the implementation plan guide every milestone. The scanner e
 | Rule | Meaning |
 | --- | --- |
 | **Read-only outside `vendor/`** | Read `composer.json`, `composer.lock`, Git state and Docker configuration; never write them. |
-| **App state above the projects** | Configuration, state, locks and logs belong in `<root>/.symfolinker/`, not at individual project roots. |
+| **App state above the projects** | Settings and locks belong in `<root>/.symfolinker/`. Package recovery metadata stays beside its backup inside `vendor/.symfolinker/`. |
 | **Always preserve the original vendor package** | During a swap, move the Composer directory to `vendor/.symfolinker/<vendor>/<package>` and keep it there while the local version is active. |
 | **No destructive fallback** | Never automatically use `rm -rf`, `composer install/update`, `git reset --hard`, `git clean` or `git stash` to "fix" an error. Stop with a message when safety cannot be established. |
 | **Atomicity** | Every mutation must support rollback: if link creation fails after making a backup, restore the backup to its original vendor location. |
@@ -176,6 +190,7 @@ Moving to Tauri 2.12 is a single coordinated change: install Rust 1.90 (`rustup 
 | `npm run preview` | Serve the built frontend. |
 | `npm test` | Rust tests without desktop features (`--no-default-features`). |
 | `npm run test:i18n` | Translation completeness, interpolation, fallback, language switching and persistence tests. |
+| `npm run test:cache` | Scan cache tests: restoring after a restart, root mismatches, rejected entries and clearing. |
 | `npm run check:native` | `cargo check` with the `desktop` feature. |
 | `npm run format:check` | `cargo fmt -- --check`. |
 
@@ -309,8 +324,11 @@ The scan is deliberately strict and predictable:
 | Status | Meaning |
 | --- | --- |
 | `missing` | No backup at `vendor/.symfolinker/<vendor>/<package>`. |
-| `available` | A real directory exists at the backup location. |
-| `invalid` | The backup location is a file or link, or cannot be inspected safely. |
+| `available` | A real backup directory exists and the journal records a completed local switch. |
+| `invalid` | The backup path is unsafe or its recorded project/package does not match. |
+| `interrupted` | A journal entry is still backing up or restoring; use Health to recover. |
+| `unrecognized` | A backup directory has no readable journal entry, such as a legacy backup. |
+| `lost` | A completed local switch was recorded but its backup is now missing. |
 
 ### Link kind
 
@@ -336,7 +354,7 @@ SymfoLinker talks to **Docker or Podman**, whichever answers first. Podman ships
 docker compose ps|config|exec      podman compose ps|config|exec
 ```
 
-Detection runs `<binary> version` once per process and caches the result, because the status poll would otherwise spawn a probe on every refresh. Installing an engine while the app runs therefore needs a restart. Docker is preferred when both answer, and the engine that replied is named in the interface and in every error message.
+Detection caches the selected engine. Failed detection expires after 30 seconds, and an explicit workspace Refresh clears detection immediately. Starting Docker or Podman therefore does not require an app restart. Docker is preferred when both answer. Probes have a five-second timeout and Compose commands a twenty-second timeout; collecting output is also bounded if a subprocess inherits the output pipes.
 
 ### Container status
 
@@ -411,12 +429,14 @@ public/SYMFONY-LICENSE.txt      # license for the profiler styling this interfac
 src/
   App.vue                       # profiler layout with five panels
   components/ProfilerIcon.vue   # inline SVG icons for menus, labels and tables
+  components/Spinner.vue        # rotating busy indicator for scans
   dev/fixture.ts                # demo workspace for npm run dev; excluded from production builds
   i18n/index.ts                 # reactive language setting and message translation
   i18n/translator.ts            # locale resolution and placeholder interpolation
   i18n/locales/                 # EN, NL, FR and DE translation catalogs
   main.ts                       # Vue + Pinia bootstrap
   stores/workspace.ts           # scan state, filters, links, chains and polling
+  stores/scanCache.ts           # validated localStorage copy of the last scan
   types/index.ts                # TypeScript counterparts of Rust models
   style.css                     # profiler styling with dark and light themes
 src-tauri/
@@ -449,6 +469,7 @@ src-tauri/
   capabilities/default.json
   tauri.conf.json
 tests/i18n.test.mjs              # translation and language setting tests
+tests/scan-cache.test.mjs        # restoring, rejecting and clearing the stored scan
 .cargo/config.toml              # resolver fallback to Rust 1.87-compatible crate versions
 docs/SymfoLinker-implementation-plan.md
 ```
@@ -463,6 +484,7 @@ The Rust crate is split into a library (`symfolinker_lib`) and a binary. Tauri i
 npm run build
 npm test
 npm run test:i18n
+npm run test:cache
 npm run format:check
 npm run check:native
 ```
@@ -485,6 +507,10 @@ Compose parsing tests cover JSON-lines and JSON-array output, stopped services, 
 
 Translation tests check catalog keys and placeholders, interpolation of dynamic data, English fallback, persisted language selection and immediate changes to rendered UI messages.
 
+Cache and interaction tests cover late status/container responses after project changes, failed service saves, uncertain swap readback, workspace shortcuts and profile persistence. Scan cache tests reopen the store against a stubbed storage: a restored scan keeps its timestamp and selected project, a selection that disappeared falls back to the first project, a cache from another development root is ignored, unreadable, incomplete and outdated entries are discarded instead of rendered, and clearing empties both the interface and the stored copy.
+
+Reliability tests cover missing backups without removing links, exact link rollback after an I/O failure (Windows), interrupted-operation recovery without a local checkout, profile preflight and rollback, corrupt journals, and locked configuration writes. Process tests cover both output streams, missing binaries, hung commands and descendants that keep output pipes open.
+
 ## Common messages
 
 | English message | Cause and solution |
@@ -502,7 +528,7 @@ Translation tests check catalog keys and placeholders, interpolation of dynamic 
 
 ## Roadmap
 
-Every milestone in this plan is implemented. What remains is not on the roadmap: a state file is still not written, backup ownership and stale backups are not yet validated, and the released installers are unsigned.
+Every milestone in this plan is implemented. Recovery metadata, bounded external commands, saved workspaces and link profiles are now implemented as well. Released installers remain unsigned.
 
 | # | Milestone | Contents |
 | --- | --- | --- |
@@ -532,7 +558,7 @@ Bump `version` in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.co
 
 ## Contributing
 
-Issues and pull requests are welcome. Before opening a pull request, run the checks in [Verification](#verification); CI runs the same ones on Linux, macOS and Windows.
+Issues and pull requests are welcome. Before opening a pull request, run the checks in [Verification](#verification); CI runs the frontend build, translation/cache/interaction tests, Rust tests, formatting and Clippy on Linux, macOS and Windows, and checks the desktop feature on Linux.
 
 Two conventions worth knowing:
 

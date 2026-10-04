@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod atomic;
 pub mod backup;
 pub mod compose;
 pub mod config;
@@ -6,9 +7,13 @@ pub mod container;
 pub mod discovery;
 pub mod engine;
 pub mod errors;
+pub mod journal;
 pub mod links;
 pub mod lock;
 pub mod models;
+pub mod process;
+pub mod profile;
+pub mod recovery;
 pub mod runtime;
 pub mod swap;
 pub mod write_guard;
@@ -17,6 +22,9 @@ pub mod write_guard;
 #[tauri::command]
 async fn scan_projects(development_root: String) -> Result<models::ScanResult, models::Message> {
     tauri::async_runtime::spawn_blocking(move || {
+        // Scanning is the user asking to look again, which includes looking for a
+        // container engine that was not running when the app started.
+        engine::forget();
         discovery::scan(std::path::Path::new(&development_root))
     })
     .await
@@ -134,8 +142,38 @@ pub fn run() {
             activate_local,
             activate_vendor,
             inspect_container,
-            set_php_service
+            set_php_service,
+            apply_profile,
+            recover_project
         ])
         .run(tauri::generate_context!())
         .expect("SymfoLinker could not be started");
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn apply_profile(
+    development_root: String,
+    entries: Vec<profile::ProfileEntry>,
+) -> Result<models::ScanResult, models::Message> {
+    tauri::async_runtime::spawn_blocking(move || {
+        profile::apply(std::path::Path::new(&development_root), &entries)
+            .map_err(|error| error.message())
+    })
+    .await
+    .map_err(|_| models::Message::new("The switch could not be completed."))?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn recover_project(
+    development_root: String,
+    project_id: String,
+) -> Result<models::ScanResult, models::Message> {
+    tauri::async_runtime::spawn_blocking(move || {
+        recovery::recover(std::path::Path::new(&development_root), &project_id)
+            .map_err(|error| error.message())
+    })
+    .await
+    .map_err(|_| models::Message::new("The switch could not be completed."))?
 }

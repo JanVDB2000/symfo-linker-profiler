@@ -18,7 +18,7 @@ const piniaUrl = pathToFileURL(`${process.cwd()}/node_modules/pinia/dist/pinia.m
 const translatorUrl = dataModule(transpile(read('src/i18n/translator.ts')))
 const { translate, resolveLocale, isMessage } = await import(translatorUrl)
 const storage = new Map()
-globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) }
+globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }
 globalThis.document = { documentElement: { lang: '' }, addEventListener() {}, hidden: false }
 globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }
 let i18nSource = read('src/i18n/index.ts').replaceAll("from 'vue'", `from '${vueUrl}'`).replaceAll("from './translator'", `from '${translatorUrl}'`)
@@ -26,11 +26,13 @@ for (const code of Object.keys(catalogs)) i18nSource = i18nSource.replace(`impor
 const i18nUrl = dataModule(transpile(i18nSource))
 const i18n = await import(i18nUrl)
 const tauriUrl = dataModule('export const isTauri = () => false; export const invoke = async () => { throw new Error("Unexpected IPC call") }; export const open = async () => null;')
+const scanCacheUrl = dataModule(transpile(read('src/stores/scanCache.ts').replaceAll("from '../i18n/translator'", `from '${translatorUrl}'`)))
 const workspaceUrl = dataModule(transpile(read('src/stores/workspace.ts')
   .replaceAll("from 'vue'", `from '${vueUrl}'`)
   .replaceAll("from 'pinia'", `from '${piniaUrl}'`)
   .replaceAll("from '@tauri-apps/api/core'", `from '${tauriUrl}'`)
   .replaceAll("from '../i18n'", `from '${i18nUrl}'`)
+  .replaceAll("from './scanCache'", `from '${scanCacheUrl}'`)
   .replaceAll('import.meta.env.DEV', 'false')))
 const { useWorkspace } = await import(workspaceUrl)
 function vueModule(path, id, replacements = {}, transformSource = source => source) {
@@ -40,9 +42,11 @@ function vueModule(path, id, replacements = {}, transformSource = source => sour
   return dataModule(transpile(source))
 }
 const iconUrl = vueModule('src/components/ProfilerIcon.vue', 'icon')
+const spinnerUrl = vueModule('src/components/Spinner.vue', 'spinner')
 const appUrl = vueModule('src/App.vue', 'app', {
   '@tauri-apps/plugin-dialog': tauriUrl, '@tauri-apps/api/core': tauriUrl,
-  './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl, './i18n': i18nUrl,
+  './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl,
+  './components/Spinner.vue': spinnerUrl, './i18n': i18nUrl,
 })
 const { default: App } = await import(appUrl)
 
@@ -129,7 +133,8 @@ test('Settings exposes a language control with all four options', () => {
 test('the Settings panel renders a translated language selector in every language', async () => {
   const settingsUrl = vueModule('src/App.vue', 'settings', {
     '@tauri-apps/plugin-dialog': tauriUrl, '@tauri-apps/api/core': tauriUrl,
-    './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl, './i18n': i18nUrl,
+    './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl,
+  './components/Spinner.vue': spinnerUrl, './i18n': i18nUrl,
   }, source => source.replace("const tab = ref('Projects')", "const tab = ref('Settings')"))
   const { default: SettingsApp } = await import(settingsUrl)
   for (const code of Object.keys(catalogs)) {

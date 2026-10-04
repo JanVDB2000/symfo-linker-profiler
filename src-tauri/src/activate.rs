@@ -53,9 +53,12 @@ pub fn activate_local_package(
     project_id: &str,
     package: &str,
 ) -> Result<ScanResult, SymfoLinkerError> {
-    let target = resolve(root, project_id, package)?;
-    let guard = WriteGuard::new(root.to_path_buf());
-    let lock = RootLock::acquire(root)?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| SymfoLinkerError::io(root, &e))?;
+    let lock = RootLock::acquire(&root)?;
+    let target = resolve(&root, project_id, package)?;
+    let guard = WriteGuard::new(root.clone());
 
     activate_local(
         &lock,
@@ -64,7 +67,7 @@ pub fn activate_local_package(
         package,
         &target.local_project,
     )?;
-    rescan(root)
+    rescan(&root)
 }
 
 /// Switches back to the Composer version, then reports the freshly scanned state.
@@ -73,12 +76,15 @@ pub fn activate_vendor_package(
     project_id: &str,
     package: &str,
 ) -> Result<ScanResult, SymfoLinkerError> {
-    let target = resolve(root, project_id, package)?;
-    let guard = WriteGuard::new(root.to_path_buf());
-    let lock = RootLock::acquire(root)?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| SymfoLinkerError::io(root, &e))?;
+    let lock = RootLock::acquire(&root)?;
+    let target = resolve(&root, project_id, package)?;
+    let guard = WriteGuard::new(root.clone());
 
     activate_vendor(&lock, &guard, &target.project, package)?;
-    rescan(root)
+    rescan(&root)
 }
 
 /// The swap itself succeeded, so a failing rescan must not read as a failed swap.

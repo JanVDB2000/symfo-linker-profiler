@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { useWorkspace } from './stores/workspace'
 import ProfilerIcon from './components/ProfilerIcon.vue'
+import Spinner from './components/Spinner.vue'
 import type { PackageStatus } from './types'
 import { t, locale, languages, translateMessage } from './i18n'
 
@@ -22,6 +23,9 @@ watch(theme, value => localStorage.setItem('symfolinker.theme', value))
 const wide = ref(localStorage.getItem('symfolinker.width') === 'full')
 watch(wide, value => localStorage.setItem('symfolinker.width', value ? 'full' : 'normal'))
 const workspaceControls = ref(false)
+const profileName = ref('')
+const pendingProfile = ref<(typeof workspace.workspaceProfiles)[number] | null>(null)
+function saveProfile() { if (workspace.saveProfile(profileName.value)) profileName.value = '' }
 const tabs = [
   { name: 'Projects', icon: 'projects' }, { name: 'Active links', icon: 'links' },
   { name: 'Runtime', icon: 'runtime' }, { name: 'Health', icon: 'health' },
@@ -30,19 +34,21 @@ const tabs = [
 const ARROW = '→'
 const HOOK_ARROW = '↳'
 const localCount = computed(() => workspace.selected?.packages.filter(p => p.mode === 'local').length ?? 0)
-const issues = computed(() => workspace.selected?.packages.filter(p => p.mode === 'unknown' || (p.mode === 'local' && p.backupStatus !== 'available')) ?? [])
+const issues = computed(() => workspace.selected?.packages.filter(p => p.mode === 'unknown' || ['interrupted', 'unrecognized', 'lost', 'invalid'].includes(p.backupStatus) || (p.mode === 'local' && p.backupStatus !== 'available')) ?? [])
 // Confirmation state for a pending switch; null while no dialog is open.
-const pendingSwap = ref<{ pkg: PackageStatus; target: 'local' | 'vendor' } | null>(null)
+const pendingSwap = ref<{ pkg: PackageStatus; target: 'local' | 'vendor'; projectId: string } | null>(null)
 function askSwap(pkg: PackageStatus, target: 'local' | 'vendor') {
-  if (pkg.mode === target || workspace.swapping) return
-  pendingSwap.value = { pkg, target }
+  if (pkg.mode === target || workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot) return
+  pendingSwap.value = { pkg, target, projectId: workspace.selectedId }
 }
 async function confirmSwap() {
   const pending = pendingSwap.value
-  if (!pending) return
+  if (!pending || pending.projectId !== workspace.selectedId) return
   pendingSwap.value = null
   await workspace.setMode(pending.pkg, pending.target)
 }
+
+watch(() => `${workspace.root}\0${workspace.selectedId}`, () => { pendingSwap.value = null; pendingProfile.value = null })
 
 const docker = computed(() => workspace.status?.docker ?? null)
 const servicesUp = computed(() => docker.value?.services.filter(s => s.running).length ?? 0)
@@ -60,6 +66,8 @@ const dockerLabel = computed(() => {
   }
 })
 const checkedAt = computed(() => workspace.lastChecked ? new Date(workspace.lastChecked).toLocaleTimeString(locale.value) : '')
+// A restored scan can be days old, so this one carries the date as well as the time.
+const scannedLabel = computed(() => workspace.scannedAt ? new Date(workspace.scannedAt).toLocaleString(locale.value) : '')
 const statusTitle = computed(() => workspace.busy ? t('Scanning workspace') : workspace.result ? t('Workspace scanned') : t('No workspace selected'))
 const pickerEmpty = computed(() => workspace.search ? t('No projects match this filter.') : workspace.result ? t('No projects found.') : t('Choose a root to get started.'))
 // Show incoming links and the target project's own outgoing links.
@@ -94,13 +102,13 @@ async function chooseRoot() {
     </header>
       <section class="request-summary" :class="{ 'summary-error': workspace.error }" :aria-label="t('Workspace status')" aria-live="polite">
         <div class="request-title"><span class="request-method">{{ t('SCAN') }}</span><h1>{{ workspace.error ? t('Scan incomplete') : workspace.result?.developmentRoot ?? statusTitle }}</h1></div>
-        <div class="request-metadata"><span><b>{{ t('Status') }}</b> <span class="status-code">{{ workspace.error ? t('ERROR') : workspace.result ? 'OK' : t('LOCAL') }}</span> <span class="status-text">{{ workspace.error ? t('Scan incomplete') : statusTitle }}</span></span><span><b>{{ t('Project') }}</b> {{ workspace.selected?.name ?? '—' }}</span><span><b>{{ t('Runtime') }}</b> {{ workspace.selected ? workspace.selected.composeFile ? 'Docker Compose' : t('Native') : '—' }}</span><span><b>{{ t('Access') }}</b> {{ t('Read only') }}</span></div>
+        <div class="request-metadata"><span><b>{{ t('Status') }}</b> <span class="status-code">{{ workspace.error ? t('ERROR') : workspace.result ? 'OK' : t('LOCAL') }}</span> <span class="status-text">{{ workspace.error ? t('Scan incomplete') : statusTitle }}</span> <Spinner v-if="workspace.busy" /></span><span v-if="scannedLabel"><b>{{ t('Scanned') }}</b> {{ scannedLabel }} <span v-if="workspace.fromCache" class="label" :title="t('Shown from the scan saved on this computer. Refresh reads the filesystem again.')">{{ t('Cached') }}</span></span><span><b>{{ t('Project') }}</b> {{ workspace.selected?.name ?? '—' }}</span><span><b>{{ t('Runtime') }}</b> {{ workspace.selected ? workspace.selected.composeFile ? 'Docker Compose' : t('Native') : '—' }}</span><span><b>{{ t('Access') }}</b> {{ t('Read only') }}</span></div>
       </section>
       <div class="profiler-layout">
         <aside class="sidebar">
           <div class="sidebar-contents">
-          <div class="sidebar-shortcuts"><button class="text-button" :aria-expanded="workspaceControls || !workspace.result" aria-controls="workspace-controls" @click="workspaceControls = !workspaceControls"><ProfilerIcon name="search" />{{ t('Workspace') }}</button><button class="text-button" :disabled="workspace.busy || !workspace.root" @click="workspace.scan()">{{ workspace.busy ? t('Scanning…') : t('Refresh') }}</button></div>
-          <form v-if="workspaceControls || !workspace.result" id="workspace-controls" class="root-form" @submit.prevent="workspace.scan()"><label for="root">{{ t('Development root') }}</label><div class="root-controls"><input id="root" v-model="workspace.root" :placeholder="t('D:\\dev or /home/user/dev')" :disabled="workspace.busy" /><button type="button" class="button button-small" :disabled="workspace.busy" @click="chooseRoot"><ProfilerIcon name="folder" />{{ t('Browse') }}</button><button class="button button-small" :disabled="workspace.busy">{{ workspace.busy ? t('Scanning…') : t('Scan') }}</button></div></form>
+          <div class="sidebar-shortcuts"><button class="text-button" :aria-expanded="workspaceControls || !workspace.result" aria-controls="workspace-controls" @click="workspaceControls = !workspaceControls"><ProfilerIcon name="search" />{{ t('Workspace') }}</button><button class="text-button" :disabled="!!workspace.swapping || workspace.busy || !workspace.root" @click="workspace.scan()"><Spinner v-if="workspace.busy" />{{ workspace.busy ? t('Scanning…') : t('Refresh') }}</button></div>
+          <form v-if="workspaceControls || !workspace.result" id="workspace-controls" class="root-form" @submit.prevent="workspace.scan()"><label for="root">{{ t('Development root') }}</label><div class="root-controls"><input id="root" v-model="workspace.root" :placeholder="t('D:\\dev or /home/user/dev')" :disabled="!!workspace.swapping || workspace.busy" /><button type="button" class="button button-small" :disabled="!!workspace.swapping || workspace.busy" @click="chooseRoot"><ProfilerIcon name="folder" />{{ t('Browse') }}</button><button class="button button-small" :disabled="!!workspace.swapping || workspace.busy"><Spinner v-if="workspace.busy" />{{ workspace.busy ? t('Scanning…') : t('Scan') }}</button></div></form>
           <nav class="collector-menu" :aria-label="t('Main navigation')">
             <button v-for="item in tabs" :key="item.name" :class="{ active: tab === item.name }" :aria-current="tab === item.name ? 'page' : undefined" @click="tab = item.name"><ProfilerIcon :name="item.icon" /><span>{{ t(item.name) }}</span><span v-if="count(item.name) !== null" class="menu-count" :class="{ 'count-warning': item.name === 'Health' && count(item.name) }">{{ count(item.name) }}</span></button>
           </nav>
@@ -117,11 +125,13 @@ async function chooseRoot() {
         </aside>
         <main class="collector-content">
           <div class="collector-heading"><h2>{{ t(tab) }}</h2></div>
+          <div v-if="workspace.swapError" class="notice error" role="alert">{{ translateMessage(workspace.swapError) }}</div>
           <div v-if="workspace.error" class="notice error" role="alert">{{ translateMessage(workspace.error) }}</div>
           <details v-if="workspace.result?.warnings.length" class="notice warning" open><summary>{{ t('{count} scan issue(s)', { count: workspace.result.warnings.length }) }}</summary><ul><li v-for="warning in workspace.result.warnings" :key="JSON.stringify(warning)">{{ translateMessage(warning) }}</li></ul></details>
           <template v-if="tab === 'Projects'">
             <div class="metrics"><div class="metric"><strong>{{ workspace.result?.projects.length ?? '—' }}</strong><span>{{ t('Projects') }}</span></div><div class="metric"><strong>{{ workspace.selected?.packages.length ?? '—' }}</strong><span>{{ t('Local dependencies') }}</span></div><div class="metric"><strong>{{ workspace.selected ? localCount : '—' }}</strong><span>{{ t('Active links') }}</span></div><div class="metric"><strong :class="{ 'text-warning': issues.length }">{{ workspace.selected ? issues.length : '—' }}</strong><span>{{ t('Issues') }}</span></div></div>
-            <template v-if="workspace.selected">
+            <div v-if="workspace.busy && !workspace.result" class="empty empty-panel scanning-panel"><Spinner size="large" :label="t('Scanning workspace')" /><h3>{{ t('Scanning workspace') }}</h3><p>{{ t('Reading composer.json, Git status and vendor paths.') }}</p></div>
+            <template v-else-if="workspace.selected">
               <h3 class="heading-live">{{ t('Project details') }} <small>{{ workspace.selected.name }}</small><span class="heading-actions"><span v-if="checkedAt" class="live" :title="t('Sync every 5 minutes while this project is selected')"><span class="live-dot"></span>{{ t('updated {time}', { time: checkedAt }) }}</span><button class="button button-small" :disabled="workspace.statusBusy" :title="t('Refresh Git and container status for {project} now', { project: workspace.selected.name })" @click="workspace.refreshStatus()"><ProfilerIcon name="refresh" />{{ workspace.statusBusy ? t('Syncing...') : t('Sync') }}</button></span></h3>
               <div class="table-scroll"><table class="property-table"><tbody>
                 <tr><th scope="row">{{ t('Composer package') }}</th><td>{{ workspace.selected.composerName ?? t('Not configured') }}</td></tr>
@@ -138,18 +148,17 @@ async function chooseRoot() {
                   <td><strong class="package-name">{{ pkg.packageName }}</strong><div class="package-constraint">{{ pkg.constraint }} <span v-if="pkg.dependencyType === 'requireDev'" class="label">require-dev</span></div><details class="package-paths"><summary>{{ t('Paths') }}</summary><dl><dt>{{ t('Local') }}</dt><dd>{{ pkg.localPath }}</dd><dt>{{ t('Vendor') }}</dt><dd>{{ pkg.vendorPath }}</dd><dt>{{ t('Backup') }}</dt><dd>{{ pkg.backupPath }}</dd></dl></details></td>
                   <td><div v-if="pkg.mode === 'unknown'" class="mode-switch"><span class="label status-warning">{{ t('UNKNOWN') }}</span></div>
                     <div v-else class="mode-switch" role="group" :aria-label="t('Mode for {name}', { name: pkg.packageName })">
-                      <button class="mode-option" :class="{ active: pkg.mode === 'vendor' }" :aria-pressed="pkg.mode === 'vendor'" :disabled="!!workspace.swapping" @click="askSwap(pkg, 'vendor')">{{ t('VENDOR') }}</button>
-                      <button class="mode-option" :class="{ active: pkg.mode === 'local' }" :aria-pressed="pkg.mode === 'local'" :disabled="!!workspace.swapping" @click="askSwap(pkg, 'local')">{{ t('LOCAL') }}</button>
+                      <button class="mode-option" :class="{ active: pkg.mode === 'vendor' }" :aria-pressed="pkg.mode === 'vendor'" :disabled="!!workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'vendor')">{{ t('VENDOR') }}</button>
+                      <button class="mode-option" :class="{ active: pkg.mode === 'local' }" :aria-pressed="pkg.mode === 'local'" :disabled="!!workspace.swapping || workspace.busy || workspace.root !== workspace.result?.developmentRoot" @click="askSwap(pkg, 'local')">{{ t('LOCAL') }}</button>
                       <span v-if="workspace.swapping === pkg.packageName" class="mode-busy">{{ t('Switching...') }}</span>
                     </div></td>
                   <td><span class="branch"><ProfilerIcon name="branch" />{{ pkg.git?.branch ?? '—' }}</span><div v-if="pkg.git?.dirty" class="text-warning">{{ t('{count} changed', { count: pkg.git.changedFiles }) }}</div></td>
                   <td :class="pkg.mode === 'unknown' ? 'text-warning' : 'text-success'">{{ status(pkg) }}</td>
-                  <td :class="{ 'text-warning': pkg.mode === 'local' && pkg.backupStatus !== 'available' }">{{ t({ missing: 'Missing', available: 'Available', invalid: 'Invalid' }[pkg.backupStatus]) }}</td>
+                  <td :class="{ 'text-warning': pkg.mode === 'local' && pkg.backupStatus !== 'available' }">{{ t({ missing: 'Missing', available: 'Available', invalid: 'Invalid', interrupted: 'Interrupted', unrecognized: 'Unrecognized', lost: 'Lost' }[pkg.backupStatus]) }}</td>
                 </tr>
               </tbody></table></div>
-              <div v-if="workspace.swapError" class="notice error" role="alert">{{ translateMessage(workspace.swapError) }}</div>
             </template>
-            <div v-else class="empty empty-panel"><ProfilerIcon name="projects" /><h3>{{ workspace.result ? t('No Composer projects found') : t('Select your development root') }}</h3><p>{{ workspace.result ? t('The scanner looks for composer.json in immediate subdirectories. Choose the parent directory of your projects.') : t('Choose the directory containing your Composer projects. Their local dependencies, Git status and vendor paths will appear here.') }}</p><button class="button" :disabled="workspace.busy" @click="chooseRoot">{{ t('Choose development root') }}</button></div>
+            <div v-else class="empty empty-panel"><ProfilerIcon name="projects" /><h3>{{ workspace.result ? t('No Composer projects found') : t('Select your development root') }}</h3><p>{{ workspace.result ? t('The scanner looks for composer.json in immediate subdirectories. Choose the parent directory of your projects.') : t('Choose the directory containing your Composer projects. Their local dependencies, Git status and vendor paths will appear here.') }}</p><button class="button" :disabled="!!workspace.swapping || workspace.busy" @click="chooseRoot">{{ t('Choose development root') }}</button></div>
           </template>
           <template v-else-if="tab === 'Active links'">
             <div class="metrics"><div class="metric"><strong>{{ workspace.linkedPackages.length }}</strong><span>{{ t('Linked packages') }}</span></div><div class="metric"><strong>{{ workspace.links.length }}</strong><span>{{ t('Active local links') }}</span></div></div>
@@ -177,12 +186,13 @@ async function chooseRoot() {
               <h3 class="heading-live">{{ t('Container') }}
                 <span class="heading-actions"><button class="button button-small" :disabled="workspace.containerBusy" @click="workspace.inspectContainer()"><ProfilerIcon name="refresh" />{{ workspace.containerBusy ? t('Inspecting...') : t('Inspect container') }}</button></span>
               </h3>
+              <div v-if="workspace.containerError" class="notice error" role="alert">{{ translateMessage(workspace.containerError) }}</div>
               <div v-if="!workspace.container" class="empty"><p>{{ t('Inspect the container to map host paths and validate linked packages.') }}</p></div>
               <template v-else>
                 <div v-if="workspace.container.message" class="notice warning">{{ translateMessage(workspace.container.message) }}</div>
                 <div class="table-scroll"><table class="property-table"><tbody>
                   <tr><th scope="row">{{ t('PHP service') }}</th><td>
-                    <select v-if="workspace.container.services.length" class="service-select" :value="workspace.container.phpService ?? ''" @change="workspace.selectPhpService(($event.target as HTMLSelectElement).value)">
+                    <select v-if="workspace.container.services.length" class="service-select" :disabled="workspace.containerBusy" :value="workspace.container.phpService ?? ''" @change="workspace.selectPhpService(($event.target as HTMLSelectElement).value)">
                       <option value="">{{ t('Choose a service') }}</option>
                       <option v-for="name in workspace.container.services" :key="name" :value="name">{{ name }}</option>
                     </select>
@@ -222,11 +232,29 @@ async function chooseRoot() {
             <div v-else class="empty"><p>{{ t('Scan your workspace and select a project.') }}</p></div><p class="help">{{ t('Status comes from docker compose ps in the project directory and refreshes automatically. Mount inspection and PHP-FPM validation will follow in the Docker milestone.') }}</p>
           </template>
           <template v-else-if="tab === 'Health'">
+            <button class="button" :disabled="!workspace.selected || workspace.busy || !!workspace.swapping" @click="workspace.recoverProject()">{{ t('Recover interrupted swaps') }}</button>
+            <p class="help">{{ t('Recovery restores preserved packages at empty vendor paths and reconciles completed operations. Occupied paths are left untouched.') }}</p>
             <h3>{{ t('Environment') }}</h3><div class="table-scroll"><table class="property-table"><tbody><tr><th scope="row">{{ t('Development root') }}</th><td><span class="label" :class="workspace.result ? 'status-success' : ''">{{ workspace.result ? t('Readable') : t('Not scanned yet') }}</span></td></tr><tr><th scope="row">{{ t('Composer projects') }}</th><td>{{ workspace.result?.projects.length ?? '—' }}</td></tr><tr><th scope="row">{{ t('Git information') }}</th><td>{{ workspace.selected?.git ? t('Available') : t('Unavailable') }}</td></tr><tr><th scope="row">{{ t('Package issues') }}</th><td>{{ workspace.selected ? issues.length : '—' }}</td></tr></tbody></table></div>
             <h3>{{ t('Packages') }} <small>{{ workspace.selected?.name }}</small></h3><div v-for="pkg in issues" :key="`${pkg.packageName}-${pkg.dependencyType}`" class="notice warning"><strong>{{ pkg.packageName }}</strong> — {{ pkg.mode === 'local' ? t('Local link has no valid vendor backup.') : status(pkg) }}</div><div v-if="!issues.length" class="empty"><p>{{ workspace.selected ? t('No package issues found.') : t('Select a scanned project to check its packages.') }}</p></div><p class="help">{{ t('This check reports readability and path status. Write permissions and containers are not checked yet.') }}</p>
           </template>
           <template v-else-if="tab === 'Settings'">
-            <h3>{{ t('Appearance') }}</h3><div class="table-scroll"><table class="property-table"><tbody><tr><th scope="row"><label for="language">{{ t('Language') }}</label></th><td><select id="language" v-model="locale"><option v-for="language in languages" :key="language.code" :value="language.code">{{ language.label }}</option></select></td></tr><tr><th scope="row">{{ t('Theme') }}</th><td><div class="theme-options" role="group" :aria-label="t('Color theme')"><button class="button" :aria-pressed="theme === 'auto'" @click="theme = 'auto'">{{ t('Automatic') }}</button><button class="button" :aria-pressed="theme === 'light'" @click="theme = 'light'"><ProfilerIcon name="sun" />{{ t('Light') }}</button><button class="button" :aria-pressed="theme === 'dark'" @click="theme = 'dark'"><ProfilerIcon name="moon" />{{ t('Dark') }}</button></div></td></tr><tr><th scope="row">{{ t('Scan scope') }}</th><td>{{ t('Immediate subdirectories of the development root') }}</td></tr><tr><th scope="row">{{ t('Project access') }}</th><td><span class="label status-success">{{ t('Read only') }}</span></td></tr></tbody></table></div><h3>{{ t('Workspace') }}</h3><p>{{ t('Use Workspace in the sidebar to change the development root. The last scanned root, theme and language are saved locally.') }}</p><p class="help">{{ t('This version reads Composer files, Git status and vendor paths. The scanner does not modify project files.') }}</p>
+            <h3>{{ t('Saved workspaces') }}</h3>
+            <div v-for="item in workspace.savedWorkspaces" :key="item.root" class="row-actions saved-entry">
+              <button class="text-button path" :disabled="workspace.busy || !!workspace.swapping" @click="workspace.openWorkspace(item.root)">{{ item.name }}</button>
+              <button class="button button-small" @click="workspace.removeWorkspace(item.root)">{{ t('Remove') }}</button>
+            </div>
+            <h3>{{ t('Link profiles') }}</h3>
+            <p>{{ t('Save the current package modes for this workspace. Refresh cached data before saving a profile.') }}</p>
+            <form class="row-actions" @submit.prevent="saveProfile">
+              <input v-model="profileName" :aria-label="t('Profile name')" :placeholder="t('Profile name')" maxlength="100" />
+              <button class="button" :disabled="!profileName.trim() || !workspace.canSaveProfile">{{ t('Save profile') }}</button>
+            </form>
+            <div v-for="profile in workspace.workspaceProfiles" :key="profile.name" class="row-actions saved-entry">
+              <strong>{{ profile.name }}</strong><span>{{ t('{count} packages', { count: profile.entries.length }) }}</span>
+              <button class="button button-small" :disabled="workspace.busy || !!workspace.swapping" @click="pendingProfile = profile">{{ t('Apply profile') }}</button>
+              <button class="button button-small" @click="workspace.removeProfile(profile.name)">{{ t('Remove') }}</button>
+            </div>
+            <h3>{{ t('Appearance') }}</h3><div class="table-scroll"><table class="property-table"><tbody><tr><th scope="row"><label for="language">{{ t('Language') }}</label></th><td><select id="language" v-model="locale"><option v-for="language in languages" :key="language.code" :value="language.code">{{ language.label }}</option></select></td></tr><tr><th scope="row">{{ t('Theme') }}</th><td><div class="theme-options" role="group" :aria-label="t('Color theme')"><button class="button" :aria-pressed="theme === 'auto'" @click="theme = 'auto'">{{ t('Automatic') }}</button><button class="button" :aria-pressed="theme === 'light'" @click="theme = 'light'"><ProfilerIcon name="sun" />{{ t('Light') }}</button><button class="button" :aria-pressed="theme === 'dark'" @click="theme = 'dark'"><ProfilerIcon name="moon" />{{ t('Dark') }}</button></div></td></tr><tr><th scope="row">{{ t('Scan scope') }}</th><td>{{ t('Immediate subdirectories of the development root') }}</td></tr><tr><th scope="row">{{ t('Project access') }}</th><td><span class="label status-success">{{ t('Read only') }}</span></td></tr><tr><th scope="row">{{ t('Saved scan') }}</th><td><div class="row-actions"><span class="label" :class="workspace.scannedAt ? 'status-success' : ''">{{ workspace.scannedAt ? t('Saved on this computer') : t('Nothing saved') }}</span><span v-if="scannedLabel" class="muted">{{ scannedLabel }}</span><button class="button button-small" :disabled="!workspace.scannedAt" @click="workspace.forgetScan()">{{ t('Clear saved scan') }}</button></div></td></tr></tbody></table></div><h3>{{ t('Workspace') }}</h3><p>{{ t('Use Workspace in the sidebar to change the development root. The last scanned root, theme and language are saved locally.') }}</p><p>{{ t('The scan itself is saved too, so reopening the app shows the same workspace without scanning again. Refresh reads the filesystem anew.') }}</p><p class="help">{{ t('This version reads Composer files, Git status and vendor paths. The scanner does not modify project files.') }}</p>
           </template>
         </main>
       </div>
@@ -245,6 +273,14 @@ async function chooseRoot() {
             <button class="button" @click="pendingSwap = null">{{ t('Cancel') }}</button>
             <button class="button button-primary" @click="confirmSwap">{{ pendingSwap.target === 'local' ? t('Use Local') : t('Restore Vendor') }}</button>
           </div>
+        </div>
+      </div>
+      <div v-if="pendingProfile" class="dialog-backdrop" @click.self="pendingProfile = null">
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+          <h3 id="profile-title">{{ t('Apply profile') }}: {{ pendingProfile.name }}</h3>
+          <p>{{ t('All packages are checked before switching. Completed changes are rolled back if a later switch fails.') }}</p>
+          <ul><li v-for="entry in pendingProfile.entries" :key="`${entry.projectId}/${entry.packageName}`">{{ entry.projectId }} / {{ entry.packageName }}: {{ entry.mode.toUpperCase() }}</li></ul>
+          <div class="dialog-actions"><button class="button" @click="pendingProfile = null">{{ t('Cancel') }}</button><button class="button button-primary" @click="workspace.applyProfile(pendingProfile); pendingProfile = null">{{ t('Apply profile') }}</button></div>
         </div>
       </div>
       <footer class="profiler-footer"><span>SymfoLinker <span class="muted">· {{ t('Read-only scanner') }}</span></span><span>{{ t('Composer workspace tools') }}</span></footer>
