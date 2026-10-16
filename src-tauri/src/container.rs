@@ -1,10 +1,20 @@
-use crate::compose::{parse_compose_config, suggest_php_service, to_container_path, VolumeMapping};
+use crate::compose::{
+    parse_compose_config, same_host_path, suggest_php_service, to_container_path, VolumeMapping,
+};
 use crate::config;
 use crate::container_mounts::{mount_plan, override_json};
 use crate::discovery::compose_file;
-use crate::models::{ContainerCheck, ContainerReport, Message, Project};
+use crate::models::{ContainerCheck, ContainerMount, ContainerReport, Message, MountSync, Project};
 use crate::runtime::container_output;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Reading Compose configuration or a container's labels is a local call; the twenty
+/// seconds match the runtime module's own Compose timeout.
+const COMPOSE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Recreating a service stops and starts a container, which is far slower than a read.
+const RECREATE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct RunningContext {
     pub project_name: String,
@@ -147,6 +157,7 @@ pub fn inspect_with_output(
             )),
             mount_plan: Vec::new(),
             can_apply_mounts: false,
+            synced: None,
         };
     };
 
@@ -181,12 +192,48 @@ pub fn inspect_with_output(
         checks,
         mount_plan,
         can_apply_mounts,
+        synced: None,
     }
 }
 
-/// New mounts require recreating the service. Keep the original Compose files and
-/// project name from its labels, add a generated override above the projects, and
-/// recreate only the selected PHP service after the UI's explicit confirmation.
+/// Why mounts are being synchronised.
+///
+/// A request from the Runtime panel must say plainly when nothing could be changed.
+/// The automatic pass after a switch must not: a container that is simply not running
+/// is an ordinary state, and reporting it as an error would read as a failed switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrigger {
+    Automatic,
+    Requested,
+}
+
+/// Brings the container's bind mounts in line with the packages that are LOCAL now.
+///
+/// A package switched to LOCAL gains the mount its source needs; one switched back to
+/// VENDOR loses that mount again. The generated override is rewritten to the complete
+/// desired set rather than appended to, which is what makes removal possible at all.
+///
+/// Docker cannot change the mounts of a running container, so the PHP service is
+/// recreated -- but only when the set actually changed, so switching packages the
+/// container already sees restarts nothing. The original Compose files, project name
+/// and environment files come from the running container's own labels and are reused
+/// unchanged; project files are never written.
+pub fn sync_mounts(
+    root: &Path,
+    project_id: &str,
+    service: Option<&str>,
+    trigger: SyncTrigger,
+) -> Result<ContainerReport, Message> {
+    sync_mounts_with_output(
+        root,
+        project_id,
+        service,
+        trigger,
+        &mut crate::runtime::container_output_with_timeout,
+    )
+}
+
+/// The Runtime panel's explicit request, for one service the user chose.
 pub fn apply_mounts(
     root: &Path,
     project_id: &str,
@@ -204,7 +251,17 @@ pub fn apply_mounts_with_output(
     root: &Path,
     project_id: &str,
     service: &str,
-    run: &mut impl FnMut(&Path, &[&str], std::time::Duration) -> Result<String, Message>,
+    run: &mut impl FnMut(&Path, &[&str], Duration) -> Result<String, Message>,
+) -> Result<ContainerReport, Message> {
+    sync_mounts_with_output(root, project_id, Some(service), SyncTrigger::Requested, run)
+}
+
+pub fn sync_mounts_with_output(
+    root: &Path,
+    project_id: &str,
+    service: Option<&str>,
+    trigger: SyncTrigger,
+    run: &mut impl FnMut(&Path, &[&str], Duration) -> Result<String, Message>,
 ) -> Result<ContainerReport, Message> {
     let root = root
         .canonicalize()
@@ -223,23 +280,86 @@ pub fn apply_mounts_with_output(
             )
         })?;
     let path = Path::new(&project.path);
-    let context = running_context(path, service, &mut |dir, args| run(dir, args, std::time::Duration::from_secs(20))).ok_or_else(|| Message::new("The running service's Compose files could not be verified. No containers were changed."))?;
-    let plan = mount_plan(project, &context.volumes);
-    if plan.is_empty() {
-        return Ok(inspect_with_output(&root, project, &mut |dir, args| {
-            run(dir, args, std::time::Duration::from_secs(20))
-        }));
+
+    // A native project has nothing to mount into, and answering before touching the
+    // engine keeps the automatic pass free of processes for projects without Compose.
+    if compose_file(path).is_none() {
+        return Ok(ContainerReport::unavailable(Message::new(
+            "This project has no Compose file; it runs natively.",
+        )));
     }
-    for mount in &plan {
-        if context.volumes.iter().any(|volume| {
-            volume.container_path == mount.container_path && volume.host_path != mount.host_path
-        }) {
-            return Err(Message::with(
-                "A different source is already mounted at {path}. No containers were changed.",
-                "path",
-                &mount.container_path,
-            ));
+
+    let service = resolve_service(&root, project, service, &mut |dir, args| {
+        run(dir, args, COMPOSE_TIMEOUT)
+    });
+    // Without a PHP service there is nothing to synchronise; the report explains why.
+    let Some(service) = service else {
+        return Ok(inspect_with_output(&root, project, &mut |dir, args| {
+            run(dir, args, COMPOSE_TIMEOUT)
+        }));
+    };
+
+    let context = running_context(path, &service, &mut |dir, args| {
+        run(dir, args, COMPOSE_TIMEOUT)
+    });
+    let Some(context) = context else {
+        if trigger == SyncTrigger::Requested {
+            return Err(Message::new("The running service's Compose files could not be verified. No containers were changed."));
         }
+        return Ok(inspect_with_output(&root, project, &mut |dir, args| {
+            run(dir, args, COMPOSE_TIMEOUT)
+        }));
+    };
+
+    let override_path = override_path(&root, project_id, &service)?;
+    let generated = read_generated(&override_path, &service)?;
+
+    // The service's own mounts, with SymfoLinker's generated ones taken out, so the
+    // desired set reads the same whether or not an earlier synchronisation applied it.
+    let base: Vec<VolumeMapping> = context
+        .volumes
+        .iter()
+        .filter(|volume| {
+            !generated
+                .iter()
+                .any(|mount| mount.container_path == volume.container_path)
+        })
+        .cloned()
+        .collect();
+    let desired = mount_plan(project, &base);
+
+    let same = |left: &ContainerMount, right: &ContainerMount| {
+        left.container_path == right.container_path
+            && same_host_path(&left.host_path, &right.host_path)
+    };
+    let added: Vec<ContainerMount> = desired
+        .iter()
+        .filter(|mount| !generated.iter().any(|old| same(old, mount)))
+        .cloned()
+        .collect();
+    let removed: Vec<ContainerMount> = generated
+        .iter()
+        .filter(|old| !desired.iter().any(|mount| same(old, mount)))
+        .cloned()
+        .collect();
+    // The override can already be right while the container still runs without it,
+    // for instance after an external `compose up` that omitted the generated file.
+    let drifted = desired.iter().any(|mount| {
+        !context.volumes.iter().any(|volume| {
+            volume.container_path == mount.container_path
+                && same_host_path(&volume.host_path, &mount.host_path)
+        })
+    });
+
+    if added.is_empty() && removed.is_empty() && !drifted {
+        let mut report = inspect_with_output(&root, project, &mut |dir, args| {
+            run(dir, args, COMPOSE_TIMEOUT)
+        });
+        report.synced = Some(MountSync::default());
+        return Ok(report);
+    }
+
+    for mount in &desired {
         if !Path::new(&mount.host_path).is_dir() {
             return Err(Message::with(
                 "The local project {path} no longer exists.",
@@ -247,62 +367,17 @@ pub fn apply_mounts_with_output(
                 &mount.host_path,
             ));
         }
-    }
-    let directory = root.join(".symfolinker/compose");
-    if std::fs::symlink_metadata(&directory)
-        .is_ok_and(|meta| !meta.is_dir() || crate::discovery::is_link(&meta))
-    {
-        return Err(Message::new(
-            "The mount override directory is unsafe. No containers were changed.",
-        ));
-    }
-    let directory = directory.join(project_id);
-    if std::fs::symlink_metadata(&directory)
-        .is_ok_and(|meta| !meta.is_dir() || crate::discovery::is_link(&meta))
-    {
-        return Err(Message::new(
-            "The mount override directory is unsafe. No containers were changed.",
-        ));
-    }
-    // One persistent override per project/service. Existing generated mounts are
-    // retained when applying additional packages after an earlier recreation.
-    let override_path = directory.join(format!("{service}.json"));
-    if std::fs::symlink_metadata(&override_path)
-        .is_ok_and(|meta| !meta.is_file() || crate::discovery::is_link(&meta))
-    {
-        return Err(Message::new(
-            "The mount override directory is unsafe. No containers were changed.",
-        ));
-    }
-    let mut mounts = plan;
-    let unsafe_override =
-        || Message::new("The mount override directory is unsafe. No containers were changed.");
-    match std::fs::read(&override_path) {
-        Ok(bytes) => {
-            let previous: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|_| unsafe_override())?;
-            let volumes = previous["services"][service]["volumes"]
-                .as_array()
-                .ok_or_else(unsafe_override)?;
-            for volume in volumes {
-                if volume["type"] != "bind" {
-                    return Err(unsafe_override());
-                }
-                let source = volume["source"].as_str().ok_or_else(unsafe_override)?;
-                let target = volume["target"].as_str().ok_or_else(unsafe_override)?;
-                if !mounts.iter().any(|mount| mount.container_path == target) {
-                    mounts.push(crate::models::ContainerMount {
-                        package_name: String::new(),
-                        host_path: source.to_owned(),
-                        container_path: target.to_owned(),
-                    });
-                }
-            }
+        // Someone else's mount at the same destination is never replaced.
+        if base.iter().any(|volume| {
+            volume.container_path == mount.container_path
+                && !same_host_path(&volume.host_path, &mount.host_path)
+        }) {
+            return Err(Message::with(
+                "A different source is already mounted at {path}. No containers were changed.",
+                "path",
+                &mount.container_path,
+            ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(unsafe_override()),
-    }
-    for mount in &mounts {
         let source = Path::new(&mount.host_path).canonicalize().ok();
         if source
             .as_ref()
@@ -311,14 +386,14 @@ pub fn apply_mounts_with_output(
             || mount.container_path == "/"
             || mount.container_path.split('/').any(|part| part == "..")
         {
-            return Err(Message::new(
-                "The mount override directory is unsafe. No containers were changed.",
-            ));
+            return Err(unsafe_override());
         }
     }
-    let json = serde_json::to_vec_pretty(&override_json(service, &mounts))
+
+    let json = serde_json::to_vec_pretty(&override_json(&service, &desired))
         .expect("mount JSON is serializable");
     crate::atomic::write_atomically(&override_path, &json).map_err(|error| error.message())?;
+
     let mut args = vec![
         "compose".to_owned(),
         "--project-name".to_owned(),
@@ -343,7 +418,7 @@ pub fn apply_mounts_with_output(
     run(
         path,
         &validation.iter().map(String::as_str).collect::<Vec<_>>(),
-        std::time::Duration::from_secs(20),
+        COMPOSE_TIMEOUT,
     )?;
     args.extend(
         [
@@ -354,7 +429,7 @@ pub fn apply_mounts_with_output(
             "--pull",
             "never",
             "--force-recreate",
-            service,
+            service.as_str(),
         ]
         .iter()
         .map(|value| (*value).to_owned()),
@@ -362,11 +437,121 @@ pub fn apply_mounts_with_output(
     run(
         path,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        std::time::Duration::from_secs(120),
+        RECREATE_TIMEOUT,
     )?;
-    Ok(inspect_with_output(&root, project, &mut |dir, args| {
-        run(dir, args, std::time::Duration::from_secs(20))
-    }))
+
+    let mut report = inspect_with_output(&root, project, &mut |dir, args| {
+        run(dir, args, COMPOSE_TIMEOUT)
+    });
+    report.synced = Some(MountSync {
+        added,
+        removed,
+        recreated: true,
+    });
+    Ok(report)
+}
+
+fn unsafe_override() -> Message {
+    Message::new("The mount override directory is unsafe. No containers were changed.")
+}
+
+/// `<root>/.symfolinker/compose/<project id>/<service>.json`, above the projects. The
+/// id is a path in a grouped root, so that directory can be nested.
+///
+/// Every component must be a plain directory or file: a link there could redirect the
+/// write into a project, or out of the workspace entirely. The service name is already
+/// restricted to Compose's own character set by `parse_running_context`, so it cannot
+/// traverse out of the directory.
+fn override_path(root: &Path, project_id: &str, service: &str) -> Result<PathBuf, Message> {
+    let base = root.join(".symfolinker");
+    // In a grouped root the project id is a path, so the override directory is nested
+    // as well. The id comes from a scan, but it is still spelled out one component at
+    // a time: a path that walks upwards must never be assembled here, whatever is
+    // asked for.
+    let mut directory = base.join("compose");
+    for part in project_id.split('/') {
+        if part.is_empty() || part.starts_with('.') || part.contains('\\') {
+            return Err(unsafe_override());
+        }
+        directory.push(part);
+    }
+    let file = directory.join(format!("{service}.json"));
+    // Every directory from `.symfolinker` down, not just the first and the last: a
+    // link anywhere along the way could redirect this write into a project, or out of
+    // the workspace entirely.
+    if std::fs::symlink_metadata(&base)
+        .is_ok_and(|meta| !meta.is_dir() || crate::discovery::is_link(&meta))
+        || !crate::discovery::safe_ancestors(&base, &file)
+    {
+        return Err(unsafe_override());
+    }
+    if std::fs::symlink_metadata(&file)
+        .is_ok_and(|meta| !meta.is_file() || crate::discovery::is_link(&meta))
+    {
+        return Err(unsafe_override());
+    }
+    Ok(file)
+}
+
+/// The mounts an earlier synchronisation generated, so this one knows what to keep,
+/// what to drop, and which of the container's mounts are its own doing.
+///
+/// A file that is not the shape this app writes is reported rather than overwritten:
+/// replacing it would silently discard whatever it actually meant.
+fn read_generated(path: &Path, service: &str) -> Result<Vec<ContainerMount>, Message> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(unsafe_override()),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| unsafe_override())?;
+    let volumes = value["services"][service]["volumes"]
+        .as_array()
+        .ok_or_else(unsafe_override)?;
+    volumes
+        .iter()
+        .map(|volume| {
+            if volume["type"] != "bind" {
+                return Err(unsafe_override());
+            }
+            Ok(ContainerMount {
+                // Which package owned a generated mount is deliberately not stored:
+                // the scan is the only authority on that, and it is read again here.
+                package_name: String::new(),
+                host_path: volume["source"]
+                    .as_str()
+                    .ok_or_else(unsafe_override)?
+                    .to_owned(),
+                container_path: volume["target"]
+                    .as_str()
+                    .ok_or_else(unsafe_override)?
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The PHP service to synchronise: the caller's choice, else the stored one, else the
+/// suggestion. Only the last case has to read the Compose configuration, so the
+/// automatic pass over a configured project costs one process less.
+fn resolve_service(
+    root: &Path,
+    project: &Project,
+    requested: Option<&str>,
+    run: &mut impl FnMut(&Path, &[&str]) -> Result<String, Message>,
+) -> Option<String> {
+    if let Some(service) = requested {
+        return Some(service.to_owned());
+    }
+    if let Some(service) = config::php_service(root, &project.path) {
+        return Some(service);
+    }
+    let stdout = run(
+        Path::new(&project.path),
+        &["compose", "config", "--format", "json"],
+    )
+    .ok()?;
+    suggest_php_service(&parse_compose_config(&stdout))
 }
 
 /// Checks each locally linked package at the path the container actually sees.

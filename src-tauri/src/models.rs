@@ -11,8 +11,15 @@ pub struct ScanResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
+    /// The project's path below the development root, with forward slashes: the
+    /// directory name itself in a flat root, `<group>/<name>` in a grouped one. Unique
+    /// either way, which is what makes it safe for the interface to act on.
     pub id: String,
+    /// The directory name on its own.
     pub name: String,
+    /// The directories between the root and the project, or `None` when the project
+    /// sits directly in the root.
+    pub group: Option<String>,
     pub composer_name: Option<String>,
     pub path: String,
     pub git: Option<GitInfo>,
@@ -43,6 +50,18 @@ pub struct PackageStatus {
     pub link_status: &'static str,
     pub backup_status: &'static str,
     pub git: Option<GitInfo>,
+    /// The version line the local checkout declares: a branch alias for its current
+    /// branch, or an explicit `version`. `None` when it declares neither.
+    pub local_version: Option<String>,
+    /// Whether that version line fits `constraint`: `satisfied`, `mismatch`, or
+    /// `unknown` when it cannot be judged with certainty.
+    pub constraint_status: &'static str,
+    /// Whether the checkout's autoload rules match the ones the generated autoloader
+    /// was built from: `matches`, `differs` or `unknown`.
+    pub autoload_status: &'static str,
+    /// True when SymfoLinker recorded a finished link that is no longer on disk and a
+    /// Composer directory took its place - what `composer install` leaves behind.
+    pub relinkable: bool,
 }
 
 /// Live project status: refreshed Git state and container status.
@@ -76,6 +95,20 @@ pub struct ComposeService {
     pub health: Option<String>,
     pub ports: String,
     pub running: bool,
+}
+
+/// What `composer dump-autoload` did, and where it did it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoloadDump {
+    /// `container` or `host`: which PHP regenerated the autoloader.
+    pub location: &'static str,
+    /// The Compose service it ran in, when it ran in a container.
+    pub service: Option<String>,
+    /// Composer's own output, verbatim and bounded to its last lines.
+    pub output: String,
+    /// Why the host was used although the project has containers, when that happened.
+    pub message: Option<Message>,
 }
 
 /// A translation key with data parameters, resolved by the frontend at render time.
@@ -115,6 +148,9 @@ pub struct ContainerReport {
     pub message: Option<Message>,
     pub mount_plan: Vec<ContainerMount>,
     pub can_apply_mounts: bool,
+    /// What a synchronisation changed, so the interface can explain why the PHP
+    /// service restarted. `None` when the report comes from a plain inspection.
+    pub synced: Option<MountSync>,
 }
 
 impl ContainerReport {
@@ -130,8 +166,21 @@ impl ContainerReport {
             message: Some(message),
             mount_plan: Vec::new(),
             can_apply_mounts: false,
+            synced: None,
         }
     }
+}
+
+/// The difference one synchronisation made to the generated bind mounts.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountSync {
+    /// Mounts added because their package is now LOCAL.
+    pub added: Vec<ContainerMount>,
+    /// Mounts dropped because their package went back to VENDOR.
+    pub removed: Vec<ContainerMount>,
+    /// Whether the PHP service was actually recreated.
+    pub recreated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +189,53 @@ pub struct ContainerMount {
     pub package_name: String,
     pub host_path: String,
     pub container_path: String,
+}
+
+/// One preserved Composer version under `vendor/.symfolinker/.history/`.
+///
+/// History is never cleaned up automatically, because deleting a package directory to
+/// make room is exactly what this app exists to avoid. That makes an explicit view of
+/// what is kept, and what it costs, part of the feature rather than an extra.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveEntry {
+    pub package_name: String,
+    /// The archive's directory name, which is also how a caller addresses it.
+    pub archive_id: String,
+    pub path: String,
+    /// The version recorded in the sidecar, when it was known at archiving time.
+    pub version: Option<String>,
+    /// Seconds since the Unix epoch; 0 when neither sidecar nor name carried a time.
+    pub archived_at: u64,
+    pub size_bytes: u64,
+    pub files: usize,
+    /// True when a sidecar describes this archive and names this package and project.
+    pub recognized: bool,
+    /// False for anything that is not a plain directory: a file or link that was moved
+    /// out of the way. Listed so it can be removed, not restored.
+    pub directory: bool,
+}
+
+/// What a switch needs from the filesystem, checked before one is attempted.
+///
+/// Every field is the answer to a question that otherwise surfaces halfway through a
+/// swap, as an operating system error on a path the user never chose.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightReport {
+    /// `<root>/.symfolinker/` can be created and written: the lock lives there.
+    pub root_writable: bool,
+    /// `<project>/vendor/` accepts a new entry, which every backup and link needs.
+    pub vendor_writable: bool,
+    /// What a link in this project would become: `symlink` or `junction`. `None` when
+    /// neither could be created, which blocks switching to LOCAL entirely.
+    pub link_kind: Option<&'static str>,
+    /// Space available to this user on the project's filesystem, when it could be read.
+    pub free_bytes: Option<u64>,
+    /// What the preserved versions already occupy, so the free space has a scale.
+    pub preserved_bytes: u64,
+    /// The first failure's own wording, so a refusal is never just a red cross.
+    pub message: Option<Message>,
 }
 
 #[derive(Debug, Serialize)]

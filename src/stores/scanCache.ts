@@ -4,7 +4,7 @@ import type { ScanResult } from '../types'
 const SCAN_KEY = 'symfolinker.scan'
 const PROJECT_KEY = 'symfolinker.project'
 // Bump this when the cached shape changes, so older entries are discarded instead of rendered.
-const CACHE_VERSION = 1
+const CACHE_VERSION = 3
 // localStorage holds roughly 5 MB per origin. Staying well below that keeps a very
 // large workspace from failing every later write with a quota error.
 const MAX_CACHE_BYTES = 2_000_000
@@ -36,10 +36,13 @@ function isGitInfo(value: unknown): boolean {
 
 function isPackageStatus(value: unknown): boolean {
   return isRecord(value) && hasStrings(value, PACKAGE_STRINGS) && isGitInfo(value.git)
+    && isNullableString(value.localVersion) && typeof value.relinkable === 'boolean'
+    && hasStrings(value, ['constraintStatus', 'autoloadStatus'])
 }
 
 function isProject(value: unknown): boolean {
   return isRecord(value) && hasStrings(value, PROJECT_STRINGS)
+    && isNullableString(value.group)
     && isNullableString(value.composerName) && isNullableString(value.composeFile)
     && isGitInfo(value.git) && Array.isArray(value.packages) && value.packages.every(isPackageStatus)
 }

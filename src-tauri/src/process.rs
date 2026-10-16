@@ -1,5 +1,7 @@
 use std::{
+    ffi::OsStr,
     io::Read,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -64,6 +66,54 @@ pub fn output_within(mut command: Command, timeout: Duration) -> Result<Output, 
         stdout: collect(stdout, deadline)?,
         stderr: collect(stderr, deadline)?,
     })
+}
+
+/// Finds an executable on `PATH`, trying the extensions this platform executes.
+///
+/// Resolution happens here rather than being left to the process launcher, because
+/// the interesting tools are shell shims on Windows: `CreateProcess` cannot start a
+/// `.bat`, and asking `cmd` to find one instead turns a missing program into a
+/// locale-dependent error string. Knowing the full path is what says which form to
+/// use, and whether to offer the tool at all.
+pub fn find_on_path(path_value: &OsStr, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    const EXTENSIONS: [&str; 4] = [".bat", ".cmd", ".exe", ""];
+    #[cfg(not(windows))]
+    const EXTENSIONS: [&str; 1] = [""];
+    std::env::split_paths(path_value)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .flat_map(|directory| {
+            EXTENSIONS
+                .iter()
+                .map(move |extension| directory.join(format!("{name}{extension}")))
+        })
+        .find(|candidate| candidate.is_file())
+}
+
+/// Whether a resolved binary is a shell shim that `CreateProcess` cannot start, and
+/// that therefore has to be handed to `cmd /C` as an argument.
+pub fn is_shim(binary: &Path) -> bool {
+    binary.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+    })
+}
+
+/// Starts a program without waiting for it and without inheriting this app's streams.
+///
+/// An editor stays open for hours, so there is nothing to wait for and no output to
+/// collect: the opposite of [`output_within`]. The child is still reaped on its own
+/// thread, because a `Child` dropped without being waited for leaves a zombie behind
+/// on Unix for as long as this app runs.
+pub fn spawn_detached(mut command: Command) -> Result<(), CommandError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| CommandError::NotStarted)?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn drain(mut source: impl Read + Send + 'static) -> Receiver<Vec<u8>> {

@@ -6,10 +6,18 @@ use std::{
 };
 use symfolinker_lib::{
     compose::VolumeMapping,
-    container::{apply_mounts_with_output, parse_running_context},
+    container::{
+        apply_mounts_with_output, parse_running_context, sync_mounts_with_output, SyncTrigger,
+    },
     container_mounts::{mount_plan, resolve_target},
     discovery::scan,
+    lock::RootLock,
+    models::Project,
+    swap::{activate_local, activate_vendor},
+    write_guard::WriteGuard,
 };
+
+const PACKAGE: &str = "blue-master/blue-master-bundle";
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Workspace(PathBuf);
@@ -41,6 +49,66 @@ impl Workspace {
         fs::write(root.join("blue-master/.env.custom"), "MODE=development").unwrap();
         Self(root.canonicalize().unwrap())
     }
+    /// Puts the package on LOCAL exactly as the app does, so the scan reports a real
+    /// link rather than a directory. The lock is released before the caller runs.
+    fn link(&self) {
+        let lock = RootLock::acquire(&self.0).unwrap();
+        let guard = WriteGuard::new(self.0.clone());
+        activate_local(
+            &lock,
+            &guard,
+            &self.0.join("blue-master"),
+            PACKAGE,
+            &self.0.join("blue-master-bundle"),
+        )
+        .unwrap();
+    }
+
+    /// Puts the package back on VENDOR, restoring the preserved Composer directory.
+    fn unlink(&self) {
+        let lock = RootLock::acquire(&self.0).unwrap();
+        let guard = WriteGuard::new(self.0.clone());
+        activate_vendor(&lock, &guard, &self.0.join("blue-master"), PACKAGE).unwrap();
+    }
+
+    fn project(&self) -> Project {
+        scan(&self.0)
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|project| project.id == "blue-master")
+            .unwrap()
+    }
+
+    /// Records the mount an earlier synchronisation would have generated, so a test can
+    /// start from a container that is already linked.
+    fn write_generated(&self) {
+        let path = self
+            .0
+            .join(".symfolinker/compose/blue-master/blue-master-php-fpm.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::json!({"services":{"blue-master-php-fpm":{"volumes":[{
+                "type": "bind",
+                "source": self.0.join("blue-master-bundle"),
+                "target": "/blue-master-bundle",
+                "bind": { "create_host_path": false }
+            }]}}})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn generated(&self) -> serde_json::Value {
+        let bytes = fs::read(
+            self.0
+                .join(".symfolinker/compose/blue-master/blue-master-php-fpm.json"),
+        )
+        .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     fn context(&self, extra_mount: bool) -> String {
         let app = self.0.join("blue-master");
         let mut mounts =
@@ -66,12 +134,8 @@ impl Drop for Workspace {
 #[test]
 fn application_only_mount_requires_the_sibling_at_the_actual_link_destination() {
     let workspace = Workspace::new();
-    let scan = scan(&workspace.0).unwrap();
-    let project = scan
-        .projects
-        .iter()
-        .find(|p| p.id == "blue-master")
-        .unwrap();
+    workspace.link();
+    let project = &workspace.project();
     let volumes = vec![VolumeMapping {
         host_path: project.path.clone(),
         container_path: "/application".into(),
@@ -88,14 +152,9 @@ fn application_only_mount_requires_the_sibling_at_the_actual_link_destination() 
 #[test]
 fn mounting_the_whole_workspace_preserves_the_existing_relative_link() {
     let workspace = Workspace::new();
-    let scan = scan(&workspace.0).unwrap();
-    let project = scan
-        .projects
-        .iter()
-        .find(|p| p.id == "blue-master")
-        .unwrap();
+    workspace.link();
     assert!(mount_plan(
-        project,
+        &workspace.project(),
         &[VolumeMapping {
             host_path: workspace.0.to_string_lossy().into(),
             container_path: "/workspace".into()
@@ -144,6 +203,7 @@ fn labels_must_match_the_selected_project_and_service() {
 #[test]
 fn applying_mounts_retains_original_files_and_recreates_only_the_selected_service() {
     let workspace = Workspace::new();
+    workspace.link();
     let app = workspace.0.join("blue-master");
     let original = fs::read(app.join("compose.yaml")).unwrap();
     let mut commands = Vec::new();
@@ -252,4 +312,163 @@ fn an_unreadable_override_is_preserved_without_recreating_the_service() {
     );
     assert!(result.is_err());
     assert_eq!(fs::read(override_path).unwrap(), b"{broken");
+}
+
+#[test]
+fn a_package_on_vendor_is_never_mounted() {
+    let workspace = Workspace::new();
+    assert!(mount_plan(
+        &workspace.project(),
+        &[VolumeMapping {
+            host_path: workspace.0.join("blue-master").to_string_lossy().into(),
+            container_path: "/application".into()
+        }]
+    )
+    .is_empty());
+}
+
+#[test]
+fn switching_back_to_vendor_removes_the_generated_mount() {
+    let workspace = Workspace::new();
+    workspace.link();
+    workspace.write_generated();
+    // The container is running with the mount an earlier LOCAL switch added.
+    let mut mounted = true;
+    let mut recreates = 0;
+    workspace.unlink();
+    let report = sync_mounts_with_output(
+        &workspace.0,
+        "blue-master",
+        None,
+        SyncTrigger::Automatic,
+        &mut |_, args, _| {
+            if args.first() == Some(&"inspect") {
+                return Ok(workspace.context(mounted));
+            }
+            if args.contains(&"-q") {
+                return Ok("container-id".into());
+            }
+            if args.contains(&"up") {
+                recreates += 1;
+                mounted = false;
+                return Ok(String::new());
+            }
+            if args == ["compose", "config", "--format", "json"] {
+                return Ok(
+                    serde_json::json!({"services":{"blue-master-php-fpm":{"volumes":[]}}})
+                        .to_string(),
+                );
+            }
+            Ok(String::new())
+        },
+    )
+    .unwrap();
+    assert_eq!(recreates, 1);
+    let synced = report.synced.unwrap();
+    assert!(synced.added.is_empty());
+    assert_eq!(synced.removed.len(), 1);
+    assert_eq!(synced.removed[0].container_path, "/blue-master-bundle");
+    // The file stays, emptied, so an external `compose up -f` keeps resolving.
+    assert_eq!(
+        workspace.generated()["services"]["blue-master-php-fpm"]["volumes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn a_synchronisation_that_changes_nothing_recreates_nothing() {
+    let workspace = Workspace::new();
+    workspace.link();
+    workspace.write_generated();
+    let mut recreates = 0;
+    let report = sync_mounts_with_output(
+        &workspace.0,
+        "blue-master",
+        None,
+        SyncTrigger::Automatic,
+        &mut |_, args, _| {
+            if args.first() == Some(&"inspect") {
+                return Ok(workspace.context(true));
+            }
+            if args.contains(&"-q") {
+                return Ok("container-id".into());
+            }
+            if args.contains(&"up") {
+                recreates += 1;
+                return Ok(String::new());
+            }
+            if args == ["compose", "config", "--format", "json"] {
+                return Ok(
+                    serde_json::json!({"services":{"blue-master-php-fpm":{"volumes":[]}}})
+                        .to_string(),
+                );
+            }
+            Ok(String::new())
+        },
+    )
+    .unwrap();
+    assert_eq!(recreates, 0);
+    let synced = report.synced.unwrap();
+    assert!(synced.added.is_empty());
+    assert!(synced.removed.is_empty());
+    assert!(!synced.recreated);
+}
+
+#[test]
+fn an_automatic_pass_over_a_stopped_container_changes_nothing() {
+    let workspace = Workspace::new();
+    workspace.link();
+    let mut recreates = 0;
+    let report = sync_mounts_with_output(
+        &workspace.0,
+        "blue-master",
+        None,
+        SyncTrigger::Automatic,
+        &mut |_, args, _| {
+            if args.contains(&"up") {
+                recreates += 1;
+            }
+            if args == ["compose", "config", "--format", "json"] {
+                return Ok(
+                    serde_json::json!({"services":{"blue-master-php-fpm":{"volumes":[]}}})
+                        .to_string(),
+                );
+            }
+            // No container id comes back: nothing is running.
+            Ok(String::new())
+        },
+    )
+    .unwrap();
+    assert_eq!(recreates, 0);
+    assert!(report.synced.is_none());
+    assert!(!report.can_apply_mounts);
+    assert!(!workspace.0.join(".symfolinker/compose").exists());
+}
+
+#[test]
+fn a_native_project_is_answered_without_touching_the_engine() {
+    let workspace = Workspace::new();
+    fs::remove_file(workspace.0.join("blue-master/compose.yaml")).unwrap();
+    fs::remove_file(workspace.0.join("blue-master/compose.override.yaml")).unwrap();
+    let mut calls = 0;
+    let report = sync_mounts_with_output(
+        &workspace.0,
+        "blue-master",
+        None,
+        SyncTrigger::Automatic,
+        &mut |_, _, _| {
+            calls += 1;
+            Ok(String::new())
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 0);
+    assert!(report.synced.is_none());
+    assert_eq!(
+        report.message.unwrap().key,
+        "This project has no Compose file; it runs natively."
+    );
 }

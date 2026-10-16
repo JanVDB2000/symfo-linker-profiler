@@ -205,6 +205,16 @@ pub fn with_vendor_backup<T>(
 /// Composer may replace a linked package with a fresh directory while the old
 /// backup remains. Keep that older version in history, then back up the newly
 /// installed version. No package directory is deleted or overwritten.
+///
+/// Whatever occupies the backup path is moved into history, in whatever state it is
+/// in: a finished backup, a leftover from an older SymfoLinker, a half-written swap,
+/// a stray file, even a link. An existing backup therefore never blocks a switch to
+/// LOCAL -- refusing used to leave no way forward from inside the app, while moving
+/// costs nothing, because history is never cleaned up automatically. A link is moved
+/// as a link, so whatever it pointed at is not touched either.
+///
+/// Restoring is the opposite case and still refuses: `activate_vendor` has to know
+/// that what it moves back really is the preserved Composer version.
 pub fn with_current_vendor_backup<T>(
     lock: &RootLock,
     guard: &WriteGuard,
@@ -222,19 +232,50 @@ pub fn with_current_vendor_backup<T>(
     if fs::symlink_metadata(&backup).is_err() {
         return with_vendor_backup(lock, guard, project, package, step);
     }
-    require_restorable_backup(guard, project, package)?;
-    let archive = project
-        .join("vendor/.symfolinker/.history")
+    let (archive, previous) = archive_backup(lock, guard, project, package)?;
+    match with_vendor_backup(lock, guard, project, package, step) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // Only put history back when the new backup was successfully rolled
+            // back. An unresolved failure must preserve both versions in place.
+            if fs::symlink_metadata(&backup).is_err() {
+                fs::rename(&archive, &backup).map_err(|e| SymfoLinkerError::io(&archive, &e))?;
+                if let Some(record) = previous {
+                    // Best effort, as everywhere else in this file: the directories are
+                    // already back where they belong, and the error the user has to act
+                    // on is the step's, not that of the record describing the result.
+                    let _ = journal::record(guard, project, record);
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Where preserved versions of one package are kept once a newer one arrives.
+pub fn history_root(project: &Path, package: &str) -> PathBuf {
+    project
+        .join("vendor")
+        .join(".symfolinker")
+        .join(".history")
         .join(package)
-        .join(format!(
-            "{}-{}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-            std::process::id(),
-            ARCHIVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+}
+
+/// Moves whatever occupies the backup path into history, with a sidecar describing it.
+///
+/// Returns the archive and the journal record that described the backup, so a caller
+/// whose next step fails can put both back. Nothing is deleted here, and nothing is
+/// inspected either: a finished backup, a half-written swap, a stray file and a link
+/// are all moved as they are, because refusing would leave no way forward from inside
+/// the app, while moving costs only disk space.
+pub fn archive_backup(
+    _lock: &RootLock,
+    guard: &WriteGuard,
+    project: &Path,
+    package: &str,
+) -> Result<(PathBuf, Option<BackupRecord>), SymfoLinkerError> {
+    let backup = backup_path(project, package);
+    let archive = history_root(project, package).join(archive_id());
     guard.assert_vendor_path(project, &archive)?;
     create_parent(&archive)?;
     let previous = journal::read_checked(project)?.remove(package);
@@ -249,21 +290,33 @@ pub fn with_current_vendor_backup<T>(
         detail: e.to_string(),
     })?;
     crate::atomic::write_atomically(&metadata, &bytes)?;
-    fs::rename(&backup, &archive).map_err(|e| SymfoLinkerError::io(&backup, &e))?;
-    match with_vendor_backup(lock, guard, project, package, step) {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            // Only put history back when the new backup was successfully rolled
-            // back. An unresolved failure must preserve both versions in place.
-            if fs::symlink_metadata(&backup).is_err() {
-                fs::rename(&archive, &backup).map_err(|e| SymfoLinkerError::io(&archive, &e))?;
-                if let Some(record) = previous {
-                    journal::record(guard, project, record)?;
-                }
-            }
-            Err(error)
-        }
+    if let Err(error) = fs::rename(&backup, &archive) {
+        // The sidecar now describes an archive that was never made, in a directory
+        // nothing cleans up by itself. Removing it is the one cleanup that is safe
+        // here: it is metadata this call just wrote, not a package.
+        let _ = fs::remove_file(&metadata);
+        return Err(SymfoLinkerError::io(&backup, &error));
     }
+    // `previous` was taken from an in-memory copy of the journal, so the record still
+    // names this package until the caller's `backup_vendor` overwrites it. A process
+    // that dies in between leaves a record claiming a backup that is now in history,
+    // which reads as `lost`: conservative, and resolved by the next switch or by
+    // Health > Preserved versions, rather than a version nobody can find.
+    Ok((archive, previous))
+}
+
+/// Unique per call: two archives of the same package within one millisecond, from one
+/// process or from two, must never land on the same directory.
+fn archive_id() -> String {
+    format!(
+        "{}-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        std::process::id(),
+        ARCHIVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// The version recorded when the backup was made, so later writes keep it.

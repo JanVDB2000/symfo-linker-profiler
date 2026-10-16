@@ -60,22 +60,112 @@ fn maps_require_and_dev_without_writing_project_files() {
     assert!(!app.join("vendor/.symfolinker").exists());
 }
 
+// A development root may be flat, grouped by team or client, or both at once. A
+// project is wherever a composer.json is, its id is the path that reaches it, and a
+// directory that holds no manifest is a group rather than a project.
 #[test]
-fn scans_only_direct_children_and_reports_invalid_manifests() {
+fn discovers_grouped_projects_and_reports_invalid_manifests() {
     let root = Workspace::new();
     root.project("good", "{}");
     root.project("broken", "{invalid");
     root.project(".hidden", "{}");
-    root.project("nested/deep", "{}");
+    root.project("library/bundle", "{}");
+    root.project("library/next/shared", "{}");
+    // A group may also hold directories that are not projects at all.
+    fs::create_dir_all(root.0.join("docker-nginx-proxy/certs")).unwrap();
     let result = scan(&root.0).unwrap();
-    assert_eq!(result.projects.len(), 1);
-    assert_eq!(result.projects[0].id, "good");
+    let found: Vec<_> = result
+        .projects
+        .iter()
+        .map(|project| {
+            (
+                project.id.as_str(),
+                project.name.as_str(),
+                project.group.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("good", "good", None),
+            ("library/bundle", "bundle", Some("library")),
+            ("library/next/shared", "shared", Some("library/next")),
+        ]
+    );
     assert_eq!(result.warnings.len(), 1);
     assert_eq!(result.warnings[0].params["name"], "broken");
     assert_eq!(
         result.warnings[0].key,
         "{name}: composer.json is invalid or unreadable; project skipped."
     );
+}
+
+// Two groups may hold a project of the same name, and an application in one group is
+// routinely served by a bundle in another. Neither may confuse the mapping: the ids
+// stay apart, and the link still resolves across the groups.
+#[test]
+fn maps_dependencies_across_groups_and_keeps_same_named_projects_apart() {
+    let root = Workspace::new();
+    root.project(
+        "apps/web",
+        r#"{"name":"acme/web","require":{"acme/bundle":"*"}}"#,
+    );
+    root.project("apps/tools", r#"{"name":"acme/app-tools"}"#);
+    root.project("library/bundle", r#"{"name":"acme/bundle"}"#);
+    root.project("library/tools", r#"{"name":"acme/library-tools"}"#);
+    let result = scan(&root.0).unwrap();
+    let ids: Vec<_> = result
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["apps/tools", "apps/web", "library/bundle", "library/tools"]
+    );
+    let web = result.projects.iter().find(|p| p.id == "apps/web").unwrap();
+    assert_eq!(web.packages.len(), 1);
+    assert_eq!(web.packages[0].local_project_id, "library/bundle");
+    assert!(web.packages[0].local_path.ends_with("bundle"));
+    assert!(result.warnings.is_empty());
+}
+
+// A project owns its whole subtree. The packages in its vendor directory are not
+// projects of this workspace, and neither is a manifest kept inside its tests.
+#[test]
+fn stops_at_a_project_and_never_walks_dependency_directories() {
+    let root = Workspace::new();
+    root.project("app", "{}");
+    root.project("app/vendor/acme/bundle", r#"{"name":"acme/bundle"}"#);
+    root.project("app/tests/fixture", "{}");
+    root.project("node_modules/package", "{}");
+    root.project("library/vendor/acme/other", "{}");
+    let result = scan(&root.0).unwrap();
+    let ids: Vec<_> = result
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect();
+    assert_eq!(ids, ["app"]);
+    assert!(result.warnings.is_empty());
+}
+
+// The depth limit is what keeps a root chosen one directory too high from turning
+// into a walk of the whole drive.
+#[test]
+fn scans_four_levels_deep_and_no_further() {
+    let root = Workspace::new();
+    root.project("a/b/c/deep", "{}");
+    root.project("a/b/c/d/deeper", "{}");
+    let result = scan(&root.0).unwrap();
+    let ids: Vec<_> = result
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect();
+    assert_eq!(ids, ["a/b/c/deep"]);
+    assert_eq!(result.projects[0].group.as_deref(), Some("a/b/c"));
 }
 
 #[test]

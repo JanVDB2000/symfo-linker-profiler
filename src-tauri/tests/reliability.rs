@@ -327,3 +327,96 @@ fn failed_restore_puts_the_exact_link_back_even_if_broken() {
     drop(held);
     swap::activate_vendor(&lock, &WriteGuard::new(&workspace.0), &app, PACKAGE).unwrap();
 }
+
+/// A backup nobody recorded, from an older SymfoLinker or placed there by hand, used
+/// to refuse the switch outright. It is archived like any other and the switch runs.
+#[test]
+fn an_unrecognized_backup_does_not_block_switching_to_local() {
+    let workspace = Workspace::new();
+    let app = workspace.0.join("app");
+    let backup = backup::backup_path(&app, PACKAGE);
+    fs::create_dir_all(&backup).unwrap();
+    fs::write(backup.join("marker"), "stray").unwrap();
+
+    profile::apply(&workspace.0, &[Workspace::entry("app", "local")]).unwrap();
+
+    assert_eq!(
+        links::inspect_link(
+            &backup::vendor_path(&app, PACKAGE),
+            &workspace.0.join("bundle")
+        ),
+        LinkState::Linked
+    );
+    // The stray directory is preserved, not discarded, and the Composer version that
+    // was in vendor took its place as the backup.
+    let archived = fs::read_dir(app.join("vendor/.symfolinker/.history/acme/bundle"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(archived.path().join("marker")).unwrap(),
+        "stray"
+    );
+    assert_eq!(
+        fs::read_to_string(backup.join("marker")).unwrap(),
+        "composer"
+    );
+}
+
+/// A file where a backup directory belongs is unusable, but it is still someone's
+/// data: it is moved aside rather than deleted, and it no longer stops the switch.
+#[test]
+fn a_file_at_the_backup_path_does_not_block_switching_to_local() {
+    let workspace = Workspace::new();
+    let app = workspace.0.join("app");
+    let backup = backup::backup_path(&app, PACKAGE);
+    fs::create_dir_all(backup.parent().unwrap()).unwrap();
+    fs::write(&backup, "not a directory").unwrap();
+    let guard = WriteGuard::new(&workspace.0);
+    let lock = RootLock::acquire(&workspace.0).unwrap();
+
+    swap::activate_local(&lock, &guard, &app, PACKAGE, &workspace.0.join("bundle")).unwrap();
+
+    assert_eq!(
+        links::inspect_link(
+            &backup::vendor_path(&app, PACKAGE),
+            &workspace.0.join("bundle")
+        ),
+        LinkState::Linked
+    );
+    let archived = fs::read_dir(app.join("vendor/.symfolinker/.history/acme/bundle"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_file() && path.extension().is_none())
+        .unwrap();
+    assert_eq!(fs::read_to_string(archived).unwrap(), "not a directory");
+    assert_eq!(
+        fs::read_to_string(backup.join("marker")).unwrap(),
+        "composer"
+    );
+}
+
+/// Restoring is the opposite case: without a usable preserved directory there is
+/// nothing to move back, so VENDOR still refuses rather than guessing.
+#[test]
+fn a_file_at_the_backup_path_still_blocks_switching_to_vendor() {
+    let workspace = Workspace::new();
+    let app = workspace.0.join("app");
+    let guard = WriteGuard::new(&workspace.0);
+    let lock = RootLock::acquire(&workspace.0).unwrap();
+    swap::activate_local(&lock, &guard, &app, PACKAGE, &workspace.0.join("bundle")).unwrap();
+    let backup = backup::backup_path(&app, PACKAGE);
+    fs::remove_dir_all(&backup).unwrap();
+    fs::write(&backup, "not a directory").unwrap();
+
+    assert!(swap::activate_vendor(&lock, &guard, &app, PACKAGE).is_err());
+    assert_eq!(
+        links::inspect_link(
+            &backup::vendor_path(&app, PACKAGE),
+            &workspace.0.join("bundle")
+        ),
+        LinkState::Linked
+    );
+}

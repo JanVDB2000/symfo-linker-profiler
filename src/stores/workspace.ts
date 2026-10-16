@@ -3,9 +3,9 @@ import { defineStore } from 'pinia'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { isMessage } from '../i18n'
 import type { Message } from '../i18n'
-import type { ContainerReport, GitInfo, LinkedPackage, PackageStatus, Project, ProjectStatus, ScanResult } from '../types'
+import type { ArchiveEntry, AutoloadDump, ContainerReport, ExternalTool, GitInfo, LinkedPackage, MountSync, PackageStatus, PreflightReport, Project, ProjectStatus, ScanResult } from '../types'
 import { clearScan, readScan, readSelected, writeScan, writeSelected, readWorkspaces, writeWorkspaces, readProfiles, writeProfiles } from './scanCache'
-import type { LinkProfile } from './scanCache'
+import type { LinkProfile, ProfileEntry } from './scanCache'
 
 // Add a short fixture delay so the busy state is visible during development.
 const FIXTURE_DELAY_MS = 400
@@ -13,6 +13,11 @@ const FIXTURE_DELAY_MS = 400
 // Refresh the selected project sparingly: each poll starts Git and Docker processes.
 // The Sync button allows an immediate refresh.
 const POLL_INTERVAL_MS = 5 * 60 * 1000
+
+// Linking two or three packages in a row is one move, not three. Waiting briefly for
+// the next switch turns that into a single container recreation instead of one each,
+// which is the difference between a pause and a workflow.
+const MOUNT_SYNC_DELAY_MS = 900
 
 // Keep the project that was open before, as long as the restored scan still has it.
 function restoreSelection(result: ScanResult): string {
@@ -25,10 +30,22 @@ export const useWorkspace = defineStore('workspace', () => {
   const savedWorkspaces = ref(readWorkspaces())
   const profiles = ref(readProfiles())
   const workspaceProfiles = computed(() => profiles.value.filter(profile => profile.root === result.value?.developmentRoot))
-  const canSaveProfile = computed(() => !!result.value && !fromCache.value && !busy.value && !swapping.value
-    && root.value === result.value.developmentRoot
-    && result.value.projects.some(project => project.packages.length > 0)
-    && result.value.projects.every(project => project.packages.every(pkg => pkg.mode !== 'unknown')))
+  /// Why the current state cannot be saved as a profile, or '' when it can.
+  ///
+  /// A profile replays modes onto disk later, so it may only be taken from a scan this
+  /// session verified, with every package in a state worth replaying. Keeping the
+  /// reason next to the rule is what lets the button explain itself instead of just
+  /// going grey.
+  const profileBlocked = computed<Message | ''>(() => {
+    const current = result.value
+    if (!current || root.value !== current.developmentRoot) return { key: 'Scan this development root before saving a profile.' }
+    if (busy.value || swapping.value) return { key: 'Wait until the workspace is idle.' }
+    if (fromCache.value) return { key: 'Refresh first: a profile records what is really on disk, not what was restored from the last session.' }
+    if (!current.projects.some(project => project.packages.length > 0)) return { key: 'There are no local dependencies to record.' }
+    if (current.projects.some(project => project.packages.some(pkg => pkg.mode === 'unknown'))) return { key: 'Some packages are in an unknown state. Resolve them under Health before saving a profile.' }
+    return ''
+  })
+  const canSaveProfile = computed(() => !profileBlocked.value)
   // Reopening the app restores the last scan, so no filesystem walk is needed to see
   // the workspace again. Refresh replaces it with a fresh read.
   const cached = readScan(root.value)
@@ -54,12 +71,53 @@ export const useWorkspace = defineStore('workspace', () => {
   const container = ref<ContainerReport | null>(null)
   const containerBusy = ref(false)
   const containerError = ref<Message | string>('')
+  // Mounts follow the links on disk: a package switched to LOCAL needs its source
+  // visible inside the container, one switched back to VENDOR must lose that mount
+  // again. This runs after every switch, with its own busy state rather than reusing
+  // swapping, because recreating a container takes far longer than the swap itself.
+  const mountSync = ref<MountSync | null>(null)
+  const mountSyncBusy = ref('')
+  const mountSyncError = ref<Message | string>('')
+  // What would put the last switch back, and what to call it on the button. Null when
+  // there is nothing to undo: nothing has been switched, the last one failed, or the
+  // undo itself has been applied. Deliberately not persisted, because it describes a
+  // state of disk this session verified.
+  const lastSwitch = ref<{ label: string; entries: ProfileEntry[] } | null>(null)
+  // The preserved versions of the selected project, read on request: listing them
+  // walks the history directory and measures every archive.
+  const archives = ref<ArchiveEntry[]>([])
+  const archivesBusy = ref(false)
+  const archivesError = ref<Message | string>('')
+  // Write checks are explicit for a stronger reason: they write. Everything that
+  // happens by itself in this app reads, and that promise has to keep holding.
+  const preflight = ref<PreflightReport | null>(null)
+  const preflightBusy = ref(false)
+  const preflightError = ref<Message | string>('')
   let statusRequest = 0
   let containerRequest = 0
+  let archiveRequest = 0
+  let preflightRequest = 0
   let contextVersion = 0
   const selected = computed(() => result.value?.projects.find(p => p.id === selectedId.value))
-  const projects = computed(() => result.value?.projects.filter(p =>
-    `${p.name} ${p.composerName ?? ''}`.toLowerCase().includes(search.value.toLowerCase())) ?? [])
+  // Searching a bundle name finds the applications that consume it, not just a project
+  // called that: you usually know which package you are about to work on, and have to
+  // reach it through whichever app happens to require it.
+  const projects = computed(() => {
+    const query = search.value.toLowerCase()
+    return result.value?.projects.filter(p =>
+      // The id rather than the name, so the group a project sits in is searchable
+      // too: in a grouped root, "library" asks for everything that team maintains.
+      `${p.id} ${p.composerName ?? ''}`.toLowerCase().includes(query)
+      || p.packages.some(pkg => pkg.packageName.toLowerCase().includes(query))) ?? []
+  })
+  // The picker lists projects under the directory they live in, so a root grouped by
+  // team or client reads the way it does on disk. A flat root yields a single group
+  // with no heading, which is the list it has always been. Grouping by key rather
+  // than by adjacency, so the order projects arrive in cannot split a group in two.
+  const projectGroups = computed(() => [...projects.value.reduce((groups, project) => {
+    const group = project.group ?? ''
+    return groups.set(group, [...(groups.get(group) ?? []), project])
+  }, new Map<string, Project[]>())].map(([group, items]) => ({ group, projects: items })))
   const links = computed(() => result.value?.projects.flatMap(project =>
     project.packages.filter(p => p.mode === 'local').map(pkg => ({ project, pkg }))) ?? [])
   // Group by local package rather than by project: the question the dashboard answers
@@ -84,6 +142,17 @@ export const useWorkspace = defineStore('workspace', () => {
     const names = map.get(project.id) ?? []
     return map.set(project.id, [...names, pkg.packageName])
   }, new Map<string, string[]>()))
+  // Packages whose link something outside this app replaced: the journal recorded a
+  // finished link and a Composer directory occupies the vendor path now. Across the
+  // whole workspace, because one `composer install` run rarely stops at one project.
+  const relinkablePackages = computed(() => result.value?.projects.flatMap(project =>
+    project.packages.filter(pkg => pkg.relinkable).map(pkg => ({
+      projectId: project.id, projectName: project.name, packageName: pkg.packageName,
+    }))) ?? [])
+  /// Whether a filesystem mutation may start now. One answer for every caller: a
+  /// second one would drift from this one the first time a reason is added.
+  const mutationReady = () => !busy.value && !swapping.value && !mountSyncBusy.value
+    && !mutationBlocked.value && !!result.value && root.value === result.value.developmentRoot
 
   // Browser development uses fixtures because the Rust scanner is unavailable.
   async function loadFixture() {
@@ -152,6 +221,8 @@ export const useWorkspace = defineStore('workspace', () => {
     scannedAt.value = 0
     fromCache.value = false
     selectedId.value = ''
+    // There is no workspace left for an undo to describe.
+    lastSwitch.value = null
   }
 
   async function openWorkspace(path: string) {
@@ -186,17 +257,83 @@ export const useWorkspace = defineStore('workspace', () => {
     writeProfiles(profiles.value)
   }
 
+  /// Adopts the state the backend read back from disk after a mutation.
+  ///
+  /// Plan section 48: no optimistic state for filesystem changes. Every mutating
+  /// command answers with a fresh scan, and this is what puts that scan on screen -
+  /// in one place, so a new mutation cannot forget one of these five lines.
+  function adoptScan(next: ScanResult) {
+    scannedAt.value = Date.now()
+    fromCache.value = false
+    mutationBlocked.value = false
+    result.value = next
+    resetLiveState()
+  }
+
+  /// Runs one mutating command and adopts the scan it returns.
+  ///
+  /// The mutations added after the toggle differ only in their command, their label,
+  /// which containers have to follow and what would undo them, so the bookkeeping
+  /// lives here rather than in each of them.
+  async function runMutation(
+    label: string,
+    command: string,
+    args: Record<string, unknown>,
+    follow: { projects: string[]; undo: ProfileEntry[] | null },
+  ) {
+    const current = result.value
+    if (!current || !mutationReady()) return false
+    swapping.value = label
+    swapError.value = ''
+    let switched = false
+    try {
+      if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
+      const next = await invoke<ScanResult>(command, { developmentRoot: current.developmentRoot, ...args })
+      adoptScan(next)
+      void refreshStatus()
+      lastSwitch.value = follow.undo?.length ? { label, entries: follow.undo } : null
+      switched = true
+    } catch (cause) {
+      swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
+      await refreshAfterSwapError()
+    } finally { swapping.value = '' }
+    if (switched && follow.projects.length) scheduleMountSync(follow.projects)
+    return switched
+  }
+
+  /// Switches every package back to LOCAL whose link an external install replaced.
+  async function relinkPackages() {
+    const pending = relinkablePackages.value
+    if (!pending.length) return
+    await runMutation('relink', 'relink_packages', { projectId: null }, {
+      projects: [...new Set(pending.map(entry => entry.projectId))],
+      // They were all on VENDOR a moment ago, which is what undoing this means.
+      undo: pending.map(entry => ({ projectId: entry.projectId, packageName: entry.packageName, mode: 'vendor' as const })),
+    })
+  }
+
+  /// Puts back what the last switch moved.
+  ///
+  /// It runs as a profile, so it is validated and reversed on failure like any other
+  /// switch: an undo is not a shortcut past the checks, it is a switch in reverse.
+  async function undoSwitch() {
+    const previous = lastSwitch.value
+    if (!previous) return
+    await runMutation('undo', 'apply_profile', { entries: previous.entries }, {
+      projects: [...new Set(previous.entries.map(entry => entry.projectId))], undo: null,
+    })
+  }
+
   async function refreshAfterSwapError() {
     const developmentRoot = result.value?.developmentRoot
+    // A switch that failed may have been rolled back halfway; what the recorded undo
+    // describes is no longer certain, so it is dropped rather than offered.
+    lastSwitch.value = null
     if (!isTauri() || !developmentRoot) return
     try {
       const next = await invoke<ScanResult>('scan_projects', { developmentRoot })
       if (root.value !== developmentRoot) return
-      scannedAt.value = Date.now()
-      fromCache.value = false
-      mutationBlocked.value = false
-      result.value = next
-      resetLiveState()
+      adoptScan(next)
       if (!next.projects.some(project => project.id === selectedId.value)) selectedId.value = next.projects[0]?.id ?? ''
       void refreshStatus()
     } catch {
@@ -211,42 +348,54 @@ export const useWorkspace = defineStore('workspace', () => {
   }
 
   async function applyProfile(profile: LinkProfile) {
-    if (busy.value || swapping.value || mutationBlocked.value || profile.root !== result.value?.developmentRoot || root.value !== profile.root) return
+    if (!mutationReady() || profile.root !== result.value?.developmentRoot || root.value !== profile.root) return
+    // Only the packages this profile actually moves need putting back afterwards.
+    const undo = profile.entries.flatMap(entry => {
+      const pkg = result.value?.projects.find(project => project.id === entry.projectId)
+        ?.packages.find(candidate => candidate.packageName === entry.packageName)
+      return pkg && pkg.mode !== 'unknown' && pkg.mode !== entry.mode
+        ? [{ projectId: entry.projectId, packageName: entry.packageName, mode: pkg.mode }]
+        : []
+    })
     swapping.value = profile.name
     swapError.value = ''
+    let switched = false
     try {
       if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
       const next = await invoke<ScanResult>('apply_profile', { developmentRoot: profile.root, entries: profile.entries })
-      scannedAt.value = Date.now()
-      fromCache.value = false
-      mutationBlocked.value = false
-      result.value = next
-      resetLiveState()
+      adoptScan(next)
       void refreshStatus()
+      lastSwitch.value = undo.length ? { label: profile.name, entries: undo } : null
+      switched = true
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
       await refreshAfterSwapError()
     } finally { swapping.value = '' }
+    // A profile can switch packages in several projects; every container follows.
+    if (switched) scheduleMountSync(profile.entries.map(entry => entry.projectId))
   }
 
   async function recoverProject() {
     const project = selected.value
-    if (!project || busy.value || swapping.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
+    if (!project || !mutationReady()) return
     swapping.value = 'recovery'
     swapError.value = ''
+    let switched = false
     try {
       if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
       const next = await invoke<ScanResult>('recover_project', { developmentRoot: result.value!.developmentRoot, projectId: project.id })
-      scannedAt.value = Date.now()
-      fromCache.value = false
-      mutationBlocked.value = false
-      result.value = next
-      resetLiveState()
+      adoptScan(next)
       void refreshStatus()
+      // A repair is not a switch, and it may well have resolved the package the
+      // recorded undo describes, so there is nothing sensible left to undo.
+      lastSwitch.value = null
+      switched = true
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
       await refreshAfterSwapError()
     } finally { swapping.value = '' }
+    // Recovery can roll a package back to VENDOR, which leaves a mount behind.
+    if (switched) scheduleMountSync([project.id])
   }
 
   // Mirror every replacement of the scan, so what is on screen is what a restart restores.
@@ -268,22 +417,27 @@ export const useWorkspace = defineStore('workspace', () => {
   /// interface changes until the command returns a fresh scan.
   async function setMode(pkg: PackageStatus, target: 'local' | 'vendor') {
     const project = selected.value
-    if (!project || swapping.value || busy.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
+    if (!project || !mutationReady()) return
+    // Read before the switch, because that is what undoing it has to restore.
+    const previousMode = pkg.mode
     swapping.value = pkg.packageName
     swapError.value = ''
+    let switched = false
     try {
       const next = await requestSwap(project.id, pkg.packageName, target)
       if (!next) return
-      scannedAt.value = Date.now()
-      fromCache.value = false
-      mutationBlocked.value = false
-      result.value = next
-      resetLiveState()
+      adoptScan(next)
       void refreshStatus()
+      if (previousMode !== 'unknown') {
+        lastSwitch.value = { label: pkg.packageName, entries: [{ projectId: project.id, packageName: pkg.packageName, mode: previousMode }] }
+      }
+      switched = true
     } catch (cause) {
       swapError.value = isMessage(cause) ? cause : { key: 'The switch could not be completed.' }
       await refreshAfterSwapError()
     } finally { swapping.value = '' }
+    // The link on disk changed, so the container's mounts have to follow it.
+    if (switched) scheduleMountSync([project.id])
   }
 
   // Same DEV guard as scan(): the fixture must stay out of production builds.
@@ -299,6 +453,9 @@ export const useWorkspace = defineStore('workspace', () => {
     throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
   }
 
+  // Runs synchronously up to its first request on purpose: the request counter below
+  // is what keeps a late response from an earlier project off the screen, and an await
+  // before it would let the selection change first.
   async function inspectContainer() {
     const project = selected.value
     if (!project || containerBusy.value) return
@@ -335,9 +492,11 @@ export const useWorkspace = defineStore('workspace', () => {
   }
 
   async function applyContainerMounts() {
+    // The automatic pass may already cover this; let it run before adding to it.
+    await flushMountSync()
     const project = selected.value
     const service = container.value?.phpService
-    if (!project || !service || containerBusy.value || swapping.value || busy.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
+    if (!project || !service || containerBusy.value || swapping.value || mountSyncBusy.value || busy.value || mutationBlocked.value || root.value !== result.value?.developmentRoot) return
     const context = contextVersion
     const request = ++containerRequest
     containerBusy.value = true
@@ -352,6 +511,160 @@ export const useWorkspace = defineStore('workspace', () => {
       if (context !== contextVersion || request !== containerRequest) return
       containerError.value = isMessage(cause) ? cause : { key: 'The container could not be inspected.' }
     } finally { if (request === containerRequest) containerBusy.value = false }
+  }
+
+  // Projects waiting for a synchronisation, and the timer that will run them together.
+  const pending = new Set<string>()
+  let mountSyncTimer: ReturnType<typeof setTimeout> | null = null
+
+  /// Queues projects for synchronisation and restarts the wait.
+  ///
+  /// Switching a second package within the delay joins the same pass, so a burst of
+  /// switches recreates the container once rather than once per package.
+  function scheduleMountSync(projectIds: string[]) {
+    for (const projectId of projectIds) pending.add(projectId)
+    if (mountSyncTimer) clearTimeout(mountSyncTimer)
+    mountSyncTimer = setTimeout(() => void flushMountSync(), MOUNT_SYNC_DELAY_MS)
+  }
+
+  /// Runs the queued synchronisation now, for anything that cannot wait for the timer:
+  /// inspecting the container, applying mounts by hand, or a test.
+  async function flushMountSync() {
+    if (mountSyncTimer) { clearTimeout(mountSyncTimer); mountSyncTimer = null }
+    if (!pending.size) return
+    // A pass is already running. It holds the development root's lock, so the queue
+    // has to wait for it rather than fail against it.
+    if (mountSyncBusy.value) { scheduleMountSync([]); return }
+    const projectIds = [...pending]
+    pending.clear()
+    await syncContainerMounts(projectIds)
+  }
+
+  // A profile touches several projects, so their changes are reported as one result.
+  const mergeSync = (current: MountSync | null, next: MountSync): MountSync => ({
+    added: [...(current?.added ?? []), ...next.added],
+    removed: [...(current?.removed ?? []), ...next.removed],
+    recreated: (current?.recreated ?? false) || next.recreated,
+  })
+
+  /// Brings each project's container mounts in line with the links on disk.
+  ///
+  /// Called after every switch rather than from a button: the mount a LOCAL package
+  /// needs, and the removal a VENDOR package implies, are part of the switch itself.
+  /// The backend recreates the PHP service only when the mount set actually changed,
+  /// so switching packages the container already sees restarts nothing.
+  async function syncContainerMounts(projectIds: string[]) {
+    const developmentRoot = result.value?.developmentRoot
+    if (!isTauri() || !developmentRoot || root.value !== developmentRoot) return
+    mountSync.value = null
+    mountSyncError.value = ''
+    for (const projectId of projectIds) {
+      const context = contextVersion
+      const request = ++containerRequest
+      mountSyncBusy.value = projectId
+      containerBusy.value = true
+      try {
+        const report = await invoke<ContainerReport>('sync_container_mounts', { developmentRoot, projectId })
+        if (context !== contextVersion || request !== containerRequest) return
+        // Only the project still on screen may replace the Runtime panel's report.
+        if (selected.value?.id === projectId) container.value = report
+        if (report.synced) mountSync.value = mergeSync(mountSync.value, report.synced)
+      } catch (cause) {
+        if (context !== contextVersion || request !== containerRequest) return
+        mountSyncError.value = isMessage(cause) ? cause : { key: 'The container mounts could not be synchronised.' }
+      } finally {
+        if (request === containerRequest) { containerBusy.value = false; mountSyncBusy.value = '' }
+      }
+    }
+    // A recreated service reports a new container id and uptime.
+    if (mountSync.value?.recreated) void refreshStatus()
+  }
+
+  /// Reads the preserved versions of the selected project.
+  ///
+  /// Explicit, like inspecting a container: it walks the history directory and
+  /// measures every archive, which is work nobody wants on every scan.
+  async function loadArchives() {
+    const project = selected.value
+    const current = result.value
+    if (!project || !current || archivesBusy.value) return
+    archivesBusy.value = true
+    archivesError.value = ''
+    const request = ++archiveRequest
+    const context = contextVersion
+    try {
+      const next = isTauri()
+        ? await invoke<ArchiveEntry[]>('project_history', { developmentRoot: current.developmentRoot, projectId: project.id })
+        : import.meta.env.DEV ? (await import('../dev/fixture')).devArchives(project) : []
+      if (request !== archiveRequest || context !== contextVersion) return
+      archives.value = next
+    } catch (cause) {
+      if (request !== archiveRequest || context !== contextVersion) return
+      archives.value = []
+      archivesError.value = isMessage(cause) ? cause : { key: 'The preserved versions could not be read.' }
+    } finally { if (request === archiveRequest) archivesBusy.value = false }
+  }
+
+  /// Removes one preserved version for good.
+  ///
+  /// The only deletion in this app, which is why it changes nothing else: the active
+  /// backup and the link stay exactly where they are, and the backend answers with
+  /// what is left rather than this guessing.
+  async function deleteArchive(entry: ArchiveEntry) {
+    const project = selected.value
+    const current = result.value
+    if (!project || !current || archivesBusy.value || !mutationReady()) return
+    archivesBusy.value = true
+    archivesError.value = ''
+    const request = ++archiveRequest
+    const context = contextVersion
+    try {
+      if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
+      const left = await invoke<ArchiveEntry[]>('delete_archive', {
+        developmentRoot: current.developmentRoot, projectId: project.id,
+        packageName: entry.packageName, archiveId: entry.archiveId,
+      })
+      if (request !== archiveRequest || context !== contextVersion) return
+      archives.value = left
+    } catch (cause) {
+      if (request !== archiveRequest || context !== contextVersion) return
+      archivesError.value = isMessage(cause) ? cause : { key: 'The preserved version could not be removed.' }
+    } finally { if (request === archiveRequest) archivesBusy.value = false }
+  }
+
+  /// Makes a preserved version the one a switch to VENDOR will restore.
+  ///
+  /// No container follows this: the link does not move, only what is kept behind it,
+  /// so the mounts are already right.
+  async function restoreArchive(entry: ArchiveEntry) {
+    const project = selected.value
+    if (!project) return
+    const done = await runMutation('archive', 'restore_archive', {
+      projectId: project.id, packageName: entry.packageName, archiveId: entry.archiveId,
+    }, { projects: [], undo: null })
+    if (done) await loadArchives()
+  }
+
+  /// Writes a probe wherever a switch needs one, then removes it again.
+  async function runPreflight() {
+    const project = selected.value
+    const current = result.value
+    if (!project || !current || preflightBusy.value || !mutationReady()) return
+    preflightBusy.value = true
+    preflightError.value = ''
+    const request = ++preflightRequest
+    const context = contextVersion
+    try {
+      const next = isTauri()
+        ? await invoke<PreflightReport>('preflight_checks', { developmentRoot: current.developmentRoot, projectId: project.id })
+        : import.meta.env.DEV ? (await import('../dev/fixture')).devPreflight() : null
+      if (request !== preflightRequest || context !== contextVersion) return
+      preflight.value = next
+    } catch (cause) {
+      if (request !== preflightRequest || context !== contextVersion) return
+      preflight.value = null
+      preflightError.value = isMessage(cause) ? cause : { key: 'The write checks could not be completed.' }
+    } finally { if (request === preflightRequest) preflightBusy.value = false }
   }
 
   let polling: ReturnType<typeof setInterval> | null = null
@@ -396,6 +709,12 @@ export const useWorkspace = defineStore('workspace', () => {
     if (document.hidden || !selected.value || (!isTauri() && !import.meta.env.DEV)) return
     void refreshStatus()
     polling = setInterval(() => void refreshStatus(), POLL_INTERVAL_MS)
+    // A watcher reports a branch change or an install the moment it happens, which is
+    // what the interval was approximating. It takes the interval's place as soon as
+    // it is established, and the interval stays when it cannot be.
+    void startWatching().then(() => {
+      if (watching.value) stopPolling()
+    })
   }
 
   // Watch the ID instead of the object: applyGit replaces the project object.
@@ -404,26 +723,180 @@ export const useWorkspace = defineStore('workspace', () => {
     contextVersion++
     statusRequest++
     containerRequest++
+    archiveRequest++
+    preflightRequest++
     statusBusy.value = false
     containerBusy.value = false
     container.value = null
     containerError.value = ''
+    mountSync.value = null
+    mountSyncError.value = ''
     status.value = null
     statusError.value = ''
     lastChecked.value = 0
+    // Both describe a moment on disk that a switch or another project invalidates.
+    archives.value = []
+    archivesError.value = ''
+    archivesBusy.value = false
+    preflight.value = null
+    preflightError.value = ''
+    preflightBusy.value = false
   }
+  // The autoload comparison reports a mismatch; this is the repair for it. Composer
+  // runs in the project's PHP container when one is up, and on the host otherwise,
+  // which is a difference worth showing rather than hiding.
+  const autoloadDump = ref<AutoloadDump | null>(null)
+  const autoloadBusy = ref(false)
+  const autoloadError = ref<Message | string>('')
+
+  /// Regenerates the selected project's autoloader, then reads the workspace again.
+  ///
+  /// The rescan is as much the point as the dump: "Autoload differs" is read from
+  /// disk, so looking again is the only honest way to clear it.
+  async function dumpAutoload() {
+    const project = selected.value
+    const current = result.value
+    if (!project || !current || autoloadBusy.value || busy.value || !!swapping.value) return
+    autoloadBusy.value = true
+    autoloadError.value = ''
+    autoloadDump.value = null
+    const context = contextVersion
+    try {
+      const report = isTauri()
+        ? await invoke<AutoloadDump>('dump_autoload', { developmentRoot: current.developmentRoot, projectId: project.id })
+        : import.meta.env.DEV ? (await import('../dev/fixture')).devAutoloadDump() : null
+      if (context !== contextVersion) return
+      autoloadDump.value = report
+      if (isTauri()) await scan()
+    } catch (cause) {
+      if (context !== contextVersion) return
+      autoloadError.value = isMessage(cause) ? cause : { key: 'The autoloader could not be regenerated.' }
+    } finally {
+      autoloadBusy.value = false
+    }
+  }
+
+  // Which tools this computer can be handed a path: only those are offered, so a
+  // button never promises an editor that is not installed.
+  const externalTools = ref<ExternalTool[]>([])
+  const externalError = ref<Message | string>('')
+  /// The path the last copy put on the clipboard, so the interface can confirm it.
+  const copiedPath = ref('')
+
+  async function loadExternalTools() {
+    if (!isTauri()) {
+      externalTools.value = import.meta.env.DEV ? ['phpstorm', 'vscode', 'terminal', 'files'] : []
+      return
+    }
+    // A failure here means no buttons rather than an error: this is a convenience,
+    // and it must never be the reason a workspace looks broken.
+    try { externalTools.value = await invoke<ExternalTool[]>('external_tools') } catch { externalTools.value = [] }
+  }
+
+  async function openExternal(tool: ExternalTool) {
+    const project = selected.value
+    const current = result.value
+    if (!project || !current) return
+    externalError.value = ''
+    if (!isTauri()) {
+      externalError.value = { key: 'Open the desktop app with npm run desktop to scan local projects.' }
+      return
+    }
+    try {
+      await invoke('open_external', { developmentRoot: current.developmentRoot, projectId: project.id, tool })
+    } catch (cause) {
+      externalError.value = isMessage(cause) ? cause : { key: 'This tool could not be started.' }
+    }
+  }
+
+  /// Copies a path to the clipboard without a plugin: the webview's own clipboard,
+  /// with the older selection trick for the contexts that refuse it.
+  async function copyPath(path: string) {
+    externalError.value = ''
+    copiedPath.value = ''
+    try {
+      await navigator.clipboard.writeText(path)
+      copiedPath.value = path
+      return
+    } catch { /* The fallback below is what the refusal leaves. */ }
+    try {
+      const field = document.createElement('textarea')
+      field.value = path
+      field.setAttribute('readonly', '')
+      field.style.position = 'fixed'
+      field.style.opacity = '0'
+      document.body.appendChild(field)
+      field.select()
+      const copied = document.execCommand('copy')
+      document.body.removeChild(field)
+      if (copied) copiedPath.value = path
+      else externalError.value = { key: 'The path could not be copied to the clipboard.' }
+    } catch {
+      externalError.value = { key: 'The path could not be copied to the clipboard.' }
+    }
+  }
+
+  // True while the backend watches the selected project. The five-minute poll is the
+  // fallback for when it cannot: a network drive, a platform limit, a project that
+  // disappeared between the scan and the watch.
+  const watching = ref(false)
+  let unlistenChanges: (() => void) | null = null
+
+  /// Asks the backend to watch the selected project, and starts listening once.
+  ///
+  /// The listener is deliberately created lazily and only in the desktop app: in the
+  /// browser there is no event bridge to import, and in the tests there is no Tauri.
+  async function startWatching() {
+    const project = selected.value
+    const current = result.value
+    watching.value = false
+    if (!isTauri() || !project || !current || root.value !== current.developmentRoot) return
+    try {
+      if (!unlistenChanges) {
+        const { listen } = await import('@tauri-apps/api/event')
+        unlistenChanges = await listen<{ projectId: string; change: 'branch' | 'vendor' }>('project-changed', event => {
+          // A selection that moved on in the meantime has a watch of its own.
+          if (event.payload.projectId !== selectedId.value) return
+          // An install or a replaced link changes what the scan reports; a branch
+          // change only changes the status, which is far cheaper to read.
+          if (event.payload.change === 'vendor') void scan()
+          else void refreshStatus()
+        })
+      }
+      await invoke('watch_project', { developmentRoot: current.developmentRoot, projectId: project.id })
+      watching.value = true
+    } catch {
+      watching.value = false
+    }
+  }
+
+  async function stopWatching() {
+    watching.value = false
+    if (!isTauri()) return
+    try { await invoke('stop_watching') } catch { /* Nothing left to stop. */ }
+  }
+
   watch(() => `${result.value?.developmentRoot ?? ''}\0${selected.value?.path ?? ''}`, () => {
     resetLiveState()
     startPolling()
   }, { flush: 'sync', immediate: true })
-  // Stop Git and Docker polling while the window is hidden.
-  const visibilityChanged = () => document.hidden ? stopPolling() : startPolling()
+  // Stop Git and Docker polling while the window is hidden, and stop watching with
+  // it: a refresh nobody can see is the cost this was meant to remove.
+  const visibilityChanged = () => {
+    if (!document.hidden) { startPolling(); return }
+    stopPolling()
+    void stopWatching()
+  }
   document.addEventListener('visibilitychange', visibilityChanged)
   onScopeDispose(() => {
     stopPolling()
+    void stopWatching()
+    unlistenChanges?.()
+    unlistenChanges = null
+    if (mountSyncTimer) clearTimeout(mountSyncTimer)
     resetLiveState()
     document.removeEventListener('visibilitychange', visibilityChanged)
   })
 
-  return { applyContainerMounts, mutationBlocked, canSaveProfile, recoverProject, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan }
+  return { applyContainerMounts, syncContainerMounts, flushMountSync, mountSync, mountSyncBusy, mountSyncError, mutationBlocked, canSaveProfile, profileBlocked, recoverProject, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, projectGroups, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan, relinkablePackages, relinkPackages, lastSwitch, undoSwitch, archives, archivesBusy, archivesError, loadArchives, deleteArchive, restoreArchive, preflight, preflightBusy, preflightError, runPreflight, autoloadDump, autoloadBusy, autoloadError, dumpAutoload, externalTools, externalError, copiedPath, loadExternalTools, openExternal, copyPath, watching, startWatching, stopWatching }
 })

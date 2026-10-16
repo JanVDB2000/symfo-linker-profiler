@@ -19,7 +19,7 @@ const translatorUrl = dataModule(transpile(read('src/i18n/translator.ts')))
 const { translate, resolveLocale, isMessage } = await import(translatorUrl)
 const storage = new Map()
 globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }
-globalThis.document = { documentElement: { lang: '' }, addEventListener() {}, hidden: false }
+globalThis.document = { documentElement: { lang: '' }, addEventListener() {}, removeEventListener() {}, hidden: false }
 globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }
 let i18nSource = read('src/i18n/index.ts').replaceAll("from 'vue'", `from '${vueUrl}'`).replaceAll("from './translator'", `from '${translatorUrl}'`)
 for (const code of Object.keys(catalogs)) i18nSource = i18nSource.replace(`import ${code} from './locales/${code}.json'`, `const ${code} = ${JSON.stringify(catalogs[code])}`)
@@ -66,7 +66,7 @@ test('all four catalogs have identical keys and interpolation parameters', () =>
 })
 
 test('all literal frontend and backend message keys exist in the catalogs', () => {
-  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/container.rs', 'src-tauri/src/lib.rs']) {
+  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/container.rs', 'src-tauri/src/lib.rs', 'src-tauri/src/history.rs', 'src-tauri/src/preflight.rs', 'src-tauri/src/relink.rs', 'src-tauri/src/dump_autoload.rs', 'src-tauri/src/external.rs', 'src-tauri/src/watch.rs']) {
     const source = read(path)
     const patterns = [ /\bt\('((?:\\.|[^'\\])*)'/g, /key: '((?:\\.|[^'\\])*)'/g, /Message::(?:new|with)\(\s*"((?:\\.|[^"\\])*)"/g ]
     for (const pattern of patterns) for (const match of source.matchAll(pattern)) {

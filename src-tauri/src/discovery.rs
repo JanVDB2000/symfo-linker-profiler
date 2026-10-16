@@ -1,8 +1,30 @@
-use crate::backup;
-use crate::journal;
 use crate::models::{GitInfo, Message, PackageStatus, Project, ScanResult};
+use crate::{autoload, backup, constraint, journal};
 use serde::Deserialize;
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// How deep below the development root a project may sit.
+///
+/// A flat root needs one level. Grouped roots (`<team>/<project>`), a group holding
+/// repositories that each contain packages (`<team>/<repo>/packages/<package>`) and
+/// everything in between need a few more. Four is deep enough for the layouts people
+/// actually keep their work in, and shallow enough that a root chosen one directory
+/// too high cannot turn a scan into a walk of the whole drive.
+const MAX_DEPTH: usize = 4;
+
+/// Directory names that are never descended into: they hold dependencies or build
+/// output rather than projects, and they are the large ones.
+const SKIPPED: [&str; 4] = ["vendor", "node_modules", "target", "dist"];
+
+/// How many directories one scan may read. A tree deeper and wider than this is
+/// scanned as far as the budget allows and then reported as incomplete, rather than
+/// leaving the interface waiting on an unbounded walk.
+const MAX_DIRECTORIES: usize = 4_000;
 
 #[derive(Deserialize)]
 struct Composer {
@@ -11,6 +33,14 @@ struct Composer {
     require: BTreeMap<String, String>,
     #[serde(default, rename = "require-dev")]
     require_dev: BTreeMap<String, String>,
+    /// A project is also somebody's package: these three describe what it provides
+    /// when it is linked into another project, rather than what it consumes.
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    autoload: Option<serde_json::Value>,
+    #[serde(default)]
+    extra: Option<serde_json::Value>,
 }
 
 // Composer package identifiers must never become arbitrary filesystem paths.
@@ -34,42 +64,22 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
     if !root.is_dir() {
         return Err(Message::new("Choose a directory as the development root."));
     }
-    let entries =
-        fs::read_dir(&root).map_err(|_| Message::new("The development root could not be read."))?;
+    // An unreadable root is an error rather than a warning: a walk that cannot start
+    // would otherwise report an empty workspace as if nothing were there.
+    if fs::read_dir(&root).is_err() {
+        return Err(Message::new("The development root could not be read."));
+    }
     let mut warnings = Vec::new();
     let mut found = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(value) => value,
-            Err(_) => {
-                warnings.push(Message::new(
-                    "A directory in the development root could not be read.",
-                ));
-                continue;
-            }
+    for (id, canonical) in project_directories(&root, &mut warnings) {
+        // The directory name is what a project is called; the group it sits in is
+        // carried separately, so a grouped root reads as a grouped root rather than
+        // as a list of paths.
+        let (group, name) = match id.rsplit_once('/') {
+            Some((group, name)) => (Some(group.to_owned()), name.to_owned()),
+            None => (None, id.clone()),
         };
-        let path = entry.path();
-        if entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        // Do not discover linked directories or follow projects outside this root.
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(_) => continue,
-        };
-        if !meta.is_dir() || is_link(&meta) {
-            continue;
-        }
-        let canonical = match path.canonicalize() {
-            Ok(path) if path.starts_with(&root) => path,
-            _ => continue,
-        };
-        let manifest = canonical.join("composer.json");
-        if !manifest.exists() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let composer: Composer = match fs::read(&manifest)
+        let composer: Composer = match fs::read(canonical.join("composer.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         {
@@ -78,7 +88,7 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
                 warnings.push(Message::with(
                     "{name}: composer.json is invalid or unreadable; project skipped.",
                     "name",
-                    name.clone(),
+                    id.clone(),
                 ));
                 continue;
             }
@@ -91,15 +101,16 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
             warnings.push(Message::with(
                 "{name}: invalid Composer package name; no local mapping available.",
                 "name",
-                name.clone(),
+                id.clone(),
             ));
         }
         let git = inspect_git(&canonical);
         let compose_file = compose_file(&canonical).map(|name| name.to_owned());
         found.push((
             Project {
-                id: name.clone(),
+                id,
                 name,
+                group,
                 composer_name: composer.name.clone(),
                 path: display(&canonical),
                 git,
@@ -110,7 +121,9 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
             canonical,
         ));
     }
-    found.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    // Sorting on the id keeps the projects of one group together, and is the same
+    // order as sorting on the name while the root is flat.
+    found.sort_by(|a, b| a.0.id.cmp(&b.0.id));
     let mut index: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, (_, composer, _)) in found.iter().enumerate() {
         if let Some(name) = &composer.name {
@@ -134,16 +147,22 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
         let journal = match journal::read_checked(&found[i].2) {
             Ok(records) => records,
             Err(_) => {
-                warnings.push(Message::with("{name}: backup journal is invalid or unreadable. Recovery requires a valid journal.", "name", found[i].0.name.clone()));
+                warnings.push(Message::with("{name}: backup journal is invalid or unreadable. Recovery requires a valid journal.", "name", found[i].0.id.clone()));
                 journal::Journal::new()
             }
         };
+        // Read once per project as well: one file describes the autoload rules of
+        // every installed package, and it is the record the generated autoloader was
+        // built from. Parsing it per package would re-read a few hundred kilobytes.
+        let installed = fs::read(found[i].2.join("vendor/composer/installed.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         for (package, record) in &journal {
             if record.state != journal::SwapState::Linked {
                 let mut warning = Message::with(
                     "{name}: interrupted operation for {package}. Use Health to recover.",
                     "name",
-                    found[i].0.name.clone(),
+                    found[i].0.id.clone(),
                 );
                 warning.params.insert("package".to_owned(), package.clone());
                 warnings.push(warning);
@@ -154,7 +173,7 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
             ("require", &found[i].1.require),
             ("requireDev", &found[i].1.require_dev),
         ] {
-            for (name, constraint) in requirements {
+            for (name, required) in requirements {
                 let Some(matches) = index.get(name) else {
                     continue;
                 };
@@ -186,9 +205,38 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
                 } else {
                     "invalid"
                 };
+                // What the checkout provides, judged against what this project asks
+                // for. Both answers are read from the local project's own manifest,
+                // which the first pass already parsed.
+                let local_version = constraint::local_version(
+                    local.1.version.as_deref(),
+                    local.1.extra.as_ref(),
+                    local.0.git.as_ref().map(|git| git.branch.as_str()),
+                );
+                let constraint_status = local_version
+                    .as_deref()
+                    .map_or(constraint::UNKNOWN, |version| {
+                        constraint::status(required, version)
+                    });
+                let installed_autoload = installed
+                    .as_ref()
+                    .and_then(|json| autoload::installed_autoload(json, name));
+                let autoload_status = if safe {
+                    autoload::status(installed_autoload.as_ref(), local.1.autoload.as_ref())
+                } else {
+                    autoload::UNKNOWN
+                };
+                // A finished link that is no longer on disk, with a Composer directory
+                // in its place: nothing in this app moved it, so `composer install`
+                // did. Switching back to LOCAL is the repair, and it is offered as one.
+                let relinkable = safe
+                    && mode == "vendor"
+                    && journal
+                        .get(name)
+                        .is_some_and(|record| record.state == journal::SwapState::Linked);
                 packages.push(PackageStatus {
                     package_name: name.clone(),
-                    constraint: constraint.clone(),
+                    constraint: required.clone(),
                     dependency_type: kind.into(),
                     local_project_id: local.0.id.clone(),
                     local_path: local.0.path.clone(),
@@ -198,6 +246,10 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
                     link_status,
                     backup_status,
                     git: local.0.git.clone(),
+                    local_version,
+                    constraint_status,
+                    autoload_status,
+                    relinkable,
                 });
             }
         }
@@ -209,6 +261,83 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
         projects: found.into_iter().map(|item| item.0).collect(),
         warnings,
     })
+}
+
+/// Every project below the development root, as (id, canonical path) pairs in the
+/// order they were found.
+///
+/// The walk is breadth-first and bounded three ways: a directory that holds a
+/// composer.json is a project and is never descended into, nothing deeper than
+/// `MAX_DEPTH` is read, and `MAX_DIRECTORIES` caps the total. That makes a flat root,
+/// a root grouped by team or client, and anything in between the same thing to the
+/// rest of the scan - a project is wherever its manifest is.
+///
+/// Links are skipped rather than followed, at every level: a linked directory is
+/// either a second name for a project that is already in the list, or a way out of
+/// the workspace entirely.
+fn project_directories(root: &Path, warnings: &mut Vec<Message>) -> Vec<(String, PathBuf)> {
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0)]);
+    let mut found = Vec::new();
+    let mut budget = MAX_DIRECTORIES;
+    while let Some((directory, depth)) = queue.pop_front() {
+        if budget == 0 {
+            warnings.push(Message::new(
+                "The development root holds too many directories to scan completely. Projects deeper in the tree may be missing.",
+            ));
+            break;
+        }
+        budget -= 1;
+        let Ok(entries) = fs::read_dir(&directory) else {
+            warnings.push(Message::with(
+                "{name}: this directory could not be read; projects inside it were skipped.",
+                "name",
+                relative_id(root, &directory),
+            ));
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                warnings.push(Message::new(
+                    "A directory in the development root could not be read.",
+                ));
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || SKIPPED.contains(&name.as_str()) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.is_dir() || is_link(&meta) {
+                continue;
+            }
+            // Resolve once, and only keep what stays inside this root.
+            let canonical = match entry.path().canonicalize() {
+                Ok(path) if path.starts_with(root) => path,
+                _ => continue,
+            };
+            if canonical.join("composer.json").exists() {
+                found.push((relative_id(root, &canonical), canonical));
+            } else if depth + 1 < MAX_DEPTH {
+                queue.push_back((canonical, depth + 1));
+            }
+        }
+    }
+    found
+}
+
+/// A project's path below the root, with forward slashes on every platform: the id the
+/// interface sends back, and the one thing that stays unique when two groups hold a
+/// project of the same name.
+fn relative_id(root: &Path, project: &Path) -> String {
+    project
+        .strip_prefix(root)
+        .unwrap_or(project)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Compose filenames are defined once; runtime.rs uses the same order.

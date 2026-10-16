@@ -15,6 +15,8 @@ const paths: Record<string, string> = {
   branch: 'M6 7v10 M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M18 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M18 7v2c0 5-12 3-12 8',
   sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1.5 1.5 M17.5 17.5L19 19 M5 19l1.5-1.5 M17.5 6.5L19 5',
   moon: 'M20.5 13A9 9 0 0 1 11 3.5 9 9 0 1 0 20.5 13z',
+  copy: 'M9 9h12v12H9z M5 15H3V3h12v2',
+  external: 'M18 13v8H3V6h8 M15 3h6v6 M10 14 21 3',
 }
 </script>
 <template><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] ?? paths.projects" /></svg></template>

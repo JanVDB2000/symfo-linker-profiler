@@ -5,7 +5,6 @@ use crate::{
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -67,9 +66,8 @@ pub fn apply(root: &Path, entries: &[ProfileEntry]) -> Result<ScanResult, SymfoL
                 &project_path,
                 &backup::backup_path(&project_path, &entry.package_name),
             )?;
-            if fs::symlink_metadata(&pkg.backup_path).is_ok() {
-                backup::require_restorable_backup(&guard, &project_path, &entry.package_name)?;
-            }
+            // Whatever sits at the backup path is archived by the switch itself, so
+            // its state is not a reason to refuse the profile before starting.
             if !Path::new(&pkg.local_path).is_dir() {
                 return Err(SymfoLinkerError::LocalProjectNotFound {
                     path: pkg.local_path.clone(),

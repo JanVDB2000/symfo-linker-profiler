@@ -120,6 +120,13 @@ pub fn to_container_path(volumes: &[VolumeMapping], host_path: &Path) -> Option<
     best.map(|(_, mapped)| mapped)
 }
 
+/// Compares two host paths the way the container runtime does: separator-insensitive,
+/// and case-insensitive on Windows. Docker reports a mount source in its own spelling,
+/// which rarely matches the scanner's character for character.
+pub fn same_host_path(left: &str, right: &str) -> bool {
+    normalise(left).trim_end_matches('/') == normalise(right).trim_end_matches('/')
+}
+
 /// Returns the part of `path` below `mount`, or `None` when it is not inside it.
 fn strip_mount(path: &str, mount: &str) -> Option<String> {
     let mount = mount.trim_end_matches('/');

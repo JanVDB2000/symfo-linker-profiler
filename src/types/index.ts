@@ -14,10 +14,22 @@ export interface PackageStatus {
   linkStatus: 'notLinked' | 'linked' | 'broken' | 'unexpectedTarget' | 'missing' | 'invalid'
   backupStatus: 'missing' | 'available' | 'invalid' | 'interrupted' | 'unrecognized' | 'lost'
   git: GitInfo | null
+  /** The version line the local checkout declares: a branch alias or a `version`. */
+  localVersion: string | null
+  /** Whether that version line fits the constraint, when it can be judged at all. */
+  constraintStatus: 'satisfied' | 'mismatch' | 'unknown'
+  /** Whether the checkout autoloads the way the generated autoloader expects. */
+  autoloadStatus: 'matches' | 'differs' | 'unknown'
+  /** True when an external `composer install` replaced a link this app recorded. */
+  relinkable: boolean
 }
 export interface Project {
+  /** Path below the development root: the name itself, or `<group>/<name>`. */
   id: string
+  /** The directory name on its own. */
   name: string
+  /** The directories between the root and the project; null when it sits in the root. */
+  group: string | null
   composerName: string | null
   path: string
   git: GitInfo | null
@@ -25,6 +37,21 @@ export interface Project {
   packages: PackageStatus[]
 }
 export interface ScanResult { developmentRoot: string; projects: Project[]; warnings: Message[] }
+
+/** What `composer dump-autoload` did, and where it did it. */
+export interface AutoloadDump {
+  /** Which PHP regenerated the autoloader. */
+  location: 'container' | 'host'
+  /** The Compose service it ran in, when it ran in a container. */
+  service: string | null
+  /** Composer's own output, verbatim and bounded to its last lines. */
+  output: string
+  /** Why the host was used although the project has containers. */
+  message: Message | null
+}
+
+/** The tools a project directory can be handed to, as the backend names them. */
+export type ExternalTool = 'phpstorm' | 'vscode' | 'terminal' | 'files'
 
 export interface ComposeService {
   name: string
@@ -64,8 +91,53 @@ export interface ContainerReport {
   projectContainerPath: string | null
   checks: ContainerCheck[]
   message: Message | null
-  mountPlan?: { packageName: string; hostPath: string; containerPath: string }[]
+  mountPlan?: ContainerMount[]
   canApplyMounts?: boolean
+  /** Present only on a synchronisation; absent on a plain inspection. */
+  synced?: MountSync | null
+}
+
+/** One generated bind mount: a local source made visible at the link's destination. */
+export interface ContainerMount {
+  packageName: string
+  hostPath: string
+  containerPath: string
+}
+
+/** What a synchronisation changed, so a container restart can be explained. */
+export interface MountSync {
+  added: ContainerMount[]
+  removed: ContainerMount[]
+  recreated: boolean
+}
+
+/** One preserved Composer version under `vendor/.symfolinker/.history/`. */
+export interface ArchiveEntry {
+  packageName: string
+  /** The archive's directory name, which is also how it is addressed. */
+  archiveId: string
+  path: string
+  version: string | null
+  /** Seconds since the Unix epoch; 0 when no timestamp could be recovered. */
+  archivedAt: number
+  sizeBytes: number
+  files: number
+  /** True when a sidecar describes this archive and names this package and project. */
+  recognized: boolean
+  /** False for a file or link that was moved aside: removable, never restorable. */
+  directory: boolean
+}
+
+/** What a switch needs from the filesystem, checked before one is attempted. */
+export interface PreflightReport {
+  rootWritable: boolean
+  vendorWritable: boolean
+  /** What a link here would become, or null when neither kind could be created. */
+  linkKind: 'symlink' | 'junction' | null
+  freeBytes: number | null
+  preservedBytes: number
+  /** The first failure's own wording, so a red cross is never just a red cross. */
+  message: Message | null
 }
 
 /** One local package and every project that currently links to it. */
