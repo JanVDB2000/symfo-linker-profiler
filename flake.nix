@@ -100,6 +100,9 @@
           ];
           buildInputs = libraries;
 
+          # Scanner tests create a repository; runtime PATH wrapping happens later.
+          nativeCheckInputs = [ pkgs.git ];
+
           # tauri::generate_context! embeds frontendDist at compile time, so ../dist
           # has to exist beside src-tauri before cargo runs. Neutralising
           # beforeBuildCommand is what stops Tauri building it a second time.
