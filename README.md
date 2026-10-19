@@ -19,6 +19,7 @@ Get an installer from the **[latest release](https://github.com/JanVDB2000/symfo
 | Windows | `.msi` or `.exe` |
 | macOS | `.dmg` for Apple silicon or Intel |
 | Linux | `.AppImage`, `.deb` or `.rpm` |
+| NixOS | `nix profile install github:JanVDB2000/symfo-linker-profiler/v0.5.0` |
 
 Builds are unsigned, so your operating system may show a security warning.
 See the [installation notes](docs/usage.md#installation) for details.
@@ -85,6 +86,8 @@ Read about [backups, profiles and containers](docs/usage.md#backups-profiles-and
 
 Requires Node.js **22.12+**, npm, Rust **1.87+**, and the platform's Tauri build prerequisites.
 Git provides branch and working-directory information.
+
+On NixOS, `nix develop` supplies all of that from the flake, so nothing needs installing first.
 
 From a checkout of this repository:
 

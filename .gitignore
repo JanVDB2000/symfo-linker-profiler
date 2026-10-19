@@ -9,3 +9,8 @@ src-tauri/gen/
 .claude
 .mcp.json
 .DS_Store
+# Nix build symlinks and the direnv cache. flake.lock is deliberately absent from
+# this list: it pins nixpkgs, so it belongs in the repository.
+result
+result-*
+.direnv/

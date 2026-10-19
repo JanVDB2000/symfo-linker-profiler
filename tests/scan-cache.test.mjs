@@ -52,6 +52,7 @@ const scanResult = () => ({
     { id: 'bundle', name: 'bundle', group: null, composerName: 'acme/bundle', path: `${ROOT}/bundle`, git, composeFile: null, packages: [] },
   ],
   warnings: [{ key: '{path} is unreadable; package statuses may be incomplete.', params: { path: ROOT } }],
+  ambiguous: [],
 })
 
 // A fresh store setup is what happens when the app is reopened.
@@ -110,6 +111,7 @@ test('a grouped workspace keeps its groups through a restore, and the filter mat
       project('tools', null),
     ],
     warnings: [],
+    ambiguous: [],
   }
   const first = reopen()
   await storeScan(first, grouped)
@@ -148,14 +150,18 @@ test('a scan taken in another development root is not restored', async () => {
 })
 
 test('an unreadable, incomplete or outdated cache entry is discarded instead of rendered', () => {
-  const valid = { version: 3, scannedAt: 1, result: scanResult() }
+  const valid = { version: 4, scannedAt: 1, result: scanResult() }
   const withPackages = packages => ({
     ...scanResult(),
     projects: [{ ...scanResult().projects[0], packages }],
   })
   const rejected = [
     'not json at all',
-    JSON.stringify({ ...valid, version: 4 }),
+    // Newer than this version understands, and two older shapes. Version 3 is the
+    // one without the ambiguous-package list, so it predates duplicate checkouts
+    // being answerable and must be re-read rather than rendered.
+    JSON.stringify({ ...valid, version: 5 }),
+    JSON.stringify({ ...valid, version: 3 }),
     JSON.stringify({ ...valid, version: 2 }),
     JSON.stringify({ ...valid, scannedAt: 0 }),
     JSON.stringify({ ...valid, result: { ...scanResult(), projects: [{ id: 'shop' }] } }),
@@ -171,6 +177,11 @@ test('an unreadable, incomplete or outdated cache entry is discarded instead of 
     JSON.stringify({ ...valid, result: withPackages([{ ...pkg, localVersion: 2 }]) }),
     JSON.stringify({ ...valid, result: { ...scanResult(), warnings: ['plain string'] } }),
     JSON.stringify({ ...valid, result: { ...scanResult(), developmentRoot: 42 } }),
+    // A duplicate-checkout question whose candidates cannot be rendered, or whose
+    // answer is the wrong type. Offering the wrong checkout is worse than rescanning.
+    JSON.stringify({ ...valid, result: { ...scanResult(), ambiguous: [{ packageName: 'acme/bundle' }] } }),
+    JSON.stringify({ ...valid, result: { ...scanResult(), ambiguous: [{ packageName: 'acme/bundle', candidates: [{ projectId: 'bundle-b' }], chosen: null }] } }),
+    JSON.stringify({ ...valid, result: { ...scanResult(), ambiguous: [{ packageName: 'acme/bundle', candidates: [], chosen: 7 }] } }),
   ]
   for (const entry of rejected) {
     storage.set('symfolinker.scan', entry)

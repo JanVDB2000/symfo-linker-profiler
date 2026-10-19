@@ -5,8 +5,10 @@ import { isTauri } from '@tauri-apps/api/core'
 import { useWorkspace } from './stores/workspace'
 import ProfilerIcon from './components/ProfilerIcon.vue'
 import Spinner from './components/Spinner.vue'
+import AmbiguousPackages from './components/AmbiguousPackages.vue'
+import UpdateCheck from './components/UpdateCheck.vue'
 import type { ArchiveEntry, ExternalTool, PackageStatus } from './types'
-import { t, locale, languages, translateMessage } from './i18n'
+import { t, locale, languages, translateMessage, isMessage } from './i18n'
 
 const workspace = useWorkspace()
 const tab = ref('Projects')
@@ -68,6 +70,13 @@ const switchBlocked = computed(() => {
   if (workspace.root !== workspace.result?.developmentRoot) return t('Scan this development root before switching.')
   return ''
 })
+// An abandoned lock is the one refusal that comes with something to do about it, so
+// it is recognised by its key rather than by a flag threaded through every mutation's
+// error path. Keep this identical to the LockStale wording in src-tauri/src/errors.rs:
+// the two are halves of one message, and the catalogues hold the key itself.
+const STALE_LOCK_KEY = 'SymfoLinker locked this development root {minutes} minutes ago and never finished ({path}). Take the lock over to continue.'
+const lockTakeoverOffered = computed(() =>
+  isMessage(workspace.swapError) && workspace.swapError.key === STALE_LOCK_KEY)
 // Product names stay as they are written; the two generic tools are translated.
 const TOOL_LABELS: Record<ExternalTool, string> = {
   phpstorm: 'PhpStorm', vscode: 'VS Code', terminal: 'Terminal', files: 'File manager',
@@ -242,12 +251,16 @@ async function chooseRoot() {
         </aside>
         <main class="collector-content">
           <div class="collector-heading"><h2>{{ t(tab) }}</h2></div>
-          <div v-if="workspace.swapError" class="notice error" role="alert">{{ translateMessage(workspace.swapError) }}</div>
+          <div v-if="workspace.swapError" class="notice error" role="alert">{{ translateMessage(workspace.swapError) }}<button v-if="lockTakeoverOffered" class="button button-small" :disabled="!!workspace.swapping" @click="workspace.takeOverLock()"><Spinner v-if="workspace.swapping === 'lock'" />{{ t('Take over the lock') }}</button></div>
           <div v-if="workspace.mountSyncBusy" class="notice" role="status"><Spinner />{{ t('Synchronising container mounts. The PHP service is recreated only if they changed.') }}</div>
           <div v-else-if="workspace.mountSyncError" class="notice warning" role="alert">{{ translateMessage(workspace.mountSyncError) }}</div>
           <div v-else-if="summaryVisible" class="notice" role="status">{{ mountSyncSummary }}</div>
           <div v-if="workspace.error" class="notice error" role="alert">{{ translateMessage(workspace.error) }}</div>
           <details v-if="workspace.result?.warnings.length" class="notice warning" open><summary>{{ t('{count} scan issue(s)', { count: workspace.result.warnings.length }) }}</summary><ul><li v-for="warning in workspace.result.warnings" :key="JSON.stringify(warning)">{{ translateMessage(warning) }}</li></ul></details>
+          <!-- Directly below the scan issues, because one of those issues is what
+               sends you here: a package with two checkouts warns above and is
+               answered immediately underneath. -->
+          <AmbiguousPackages />
           <div v-if="workspace.relinkablePackages.length" class="notice warning" role="status">
             <strong>{{ t('{count} replaced link(s)', { count: workspace.relinkablePackages.length }) }}</strong>
             <p>{{ t('A composer install wrote its own directory over these links. Restoring them switches the packages back to LOCAL; the newly installed version is preserved first, as always.') }}</p>
@@ -346,7 +359,10 @@ async function chooseRoot() {
                 <div v-if="workspace.container.message" class="notice warning">{{ translateMessage(workspace.container.message) }}</div>
                 <div class="table-scroll"><table class="property-table"><tbody>
                   <tr><th scope="row">{{ t('PHP service') }}</th><td>
-                    <select v-if="workspace.container.services.length" class="service-select" :disabled="workspace.containerBusy" :value="workspace.container.phpService ?? ''" @change="workspace.selectPhpService(($event.target as HTMLSelectElement).value)">
+                    <!-- Saving the service takes the development-root lock, so the
+                         control stands aside for a switch like every other one that
+                         writes, and says why instead of going quietly grey. -->
+                    <select v-if="workspace.container.services.length" class="service-select" :disabled="workspace.containerBusy || !!switchBlocked" :title="switchBlocked || undefined" :value="workspace.container.phpService ?? ''" @change="workspace.selectPhpService(($event.target as HTMLSelectElement).value)">
                       <option value="">{{ t('Choose a service') }}</option>
                       <option v-for="name in workspace.container.services" :key="name" :value="name">{{ name }}</option>
                     </select>
@@ -408,6 +424,7 @@ async function chooseRoot() {
                 <tr><th scope="row">{{ t('Development root') }}</th><td><span class="label" :class="workspace.preflight.rootWritable ? 'status-success' : 'status-error'">{{ workspace.preflight.rootWritable ? t('Writable') : t('Not writable') }}</span></td></tr>
                 <tr><th scope="row">{{ t('Vendor directory') }}</th><td><span class="label" :class="workspace.preflight.vendorWritable ? 'status-success' : 'status-error'">{{ workspace.preflight.vendorWritable ? t('Writable') : t('Not writable') }}</span></td></tr>
                 <tr><th scope="row">{{ t('Link type') }}</th><td><span class="label" :class="workspace.preflight.linkKind ? 'status-success' : 'status-error'">{{ linkKindLabel }}</span><span v-if="workspace.preflight.linkKind === 'junction'" class="muted docker-note">{{ t('Container path mapping cannot be assumed to work with an absolute target.') }}</span></td></tr>
+                <tr><th scope="row">{{ t('File locking') }}</th><td><span class="label" :class="workspace.preflight.lockingSupported ? 'status-success' : 'status-warning'">{{ workspace.preflight.lockingSupported ? t('Supported') : t('Not supported') }}</span><span v-if="!workspace.preflight.lockingSupported" class="muted docker-note">{{ t('Switching works, but a second SymfoLinker working in this root could not be noticed.') }}</span></td></tr>
                 <tr><th scope="row">{{ t('Free space') }}</th><td>{{ workspace.preflight.freeBytes === null ? t('Unavailable') : formatBytes(workspace.preflight.freeBytes) }}</td></tr>
                 <tr><th scope="row">{{ t('Preserved versions') }}</th><td>{{ formatBytes(workspace.preflight.preservedBytes) }}</td></tr>
               </tbody></table></div>
@@ -453,6 +470,9 @@ async function chooseRoot() {
               <button class="button button-small" :disabled="workspace.busy || !!workspace.swapping" @click="workspace.removeProfile(profile.name)">{{ t('Remove') }}</button>
             </div>
             <h3>{{ t('Appearance') }}</h3><div class="table-scroll"><table class="property-table"><tbody><tr><th scope="row"><label for="language">{{ t('Language') }}</label></th><td><select id="language" v-model="locale"><option v-for="language in languages" :key="language.code" :value="language.code">{{ language.label }}</option></select></td></tr><tr><th scope="row">{{ t('Theme') }}</th><td><div class="theme-options" role="group" :aria-label="t('Color theme')"><button class="button" :aria-pressed="theme === 'auto'" @click="theme = 'auto'">{{ t('Automatic') }}</button><button class="button" :aria-pressed="theme === 'light'" @click="theme = 'light'"><ProfilerIcon name="sun" />{{ t('Light') }}</button><button class="button" :aria-pressed="theme === 'dark'" @click="theme = 'dark'"><ProfilerIcon name="moon" />{{ t('Dark') }}</button></div></td></tr><tr><th scope="row">{{ t('Scan scope') }}</th><td>{{ t('Immediate subdirectories of the development root') }}</td></tr><tr><th scope="row">{{ t('Project access') }}</th><td><span class="label status-success">{{ t('Read only') }}</span></td></tr><tr><th scope="row">{{ t('Saved scan') }}</th><td><div class="row-actions"><span class="label" :class="workspace.scannedAt ? 'status-success' : ''">{{ workspace.scannedAt ? t('Saved on this computer') : t('Nothing saved') }}</span><span v-if="scannedLabel" class="muted">{{ scannedLabel }}</span><button class="button button-small" :disabled="!workspace.scannedAt" @click="workspace.forgetScan()">{{ t('Clear saved scan') }}</button></div></td></tr></tbody></table></div><h3>{{ t('Workspace') }}</h3><p>{{ t('Use Workspace in the sidebar to change the development root. The last scanned root, theme and language are saved locally.') }}</p><p>{{ t('The scan itself is saved too, so reopening the app shows the same workspace without scanning again. Refresh reads the filesystem anew.') }}</p><p class="help">{{ t('This version reads Composer files, Git status and vendor paths. The scanner does not modify project files.') }}</p>
+            <h3>{{ t('Version') }}</h3>
+            <p class="help">{{ t('The check contacts GitHub once, on this button and never on its own. Nothing is sent.') }}</p>
+            <UpdateCheck />
           </template>
         </main>
       </div>

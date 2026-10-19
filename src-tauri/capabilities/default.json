@@ -3,5 +3,5 @@
   "identifier": "main",
   "description": "Directory selection for the read-only workspace scanner",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "core:app:allow-version"]
 }

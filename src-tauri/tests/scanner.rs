@@ -1,10 +1,16 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use symfolinker_lib::discovery::{scan, valid_package_name};
+use symfolinker_lib::discovery::{scan, scan_with, valid_package_name};
+
+/// One stored "use this checkout" choice, as `config.json` holds them.
+fn preference(package: &str, project_id: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(package.to_owned(), project_id.to_owned())])
+}
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Workspace(PathBuf);
@@ -168,19 +174,109 @@ fn scans_four_levels_deep_and_no_further() {
     assert_eq!(result.projects[0].group.as_deref(), Some("a/b/c"));
 }
 
+/// The same repository checked out twice is a deliberate arrangement, not a defect:
+/// one clone for a multi-tenant test, another for QA so a working tree need not be
+/// stashed. The scanner still refuses to guess between them, but it now says what the
+/// candidates are instead of dropping the package out of the interface entirely.
 #[test]
-fn rejects_ambiguous_package_mapping() {
+fn offers_the_candidates_when_one_package_has_two_checkouts() {
     let root = Workspace::new();
     root.project("app", r#"{"require":{"acme/bundle":"*"}}"#);
     root.project("bundle-a", r#"{"name":"acme/bundle"}"#);
     root.project("bundle-b", r#"{"name":"acme/bundle"}"#);
+
     let result = scan(&root.0).unwrap();
-    assert!(result.projects[0].packages.is_empty());
+
+    assert!(
+        result.projects[0].packages.is_empty(),
+        "still never guessed"
+    );
     assert_eq!(
         result.warnings[0].key,
         "{name}: multiple local projects found; automatic mapping skipped."
     );
     assert_eq!(result.warnings[0].params["name"], "acme/bundle");
+    let ambiguous = &result.ambiguous[0];
+    assert_eq!(ambiguous.package_name, "acme/bundle");
+    assert_eq!(ambiguous.chosen, None);
+    let candidates: Vec<&str> = ambiguous
+        .candidates
+        .iter()
+        .map(|candidate| candidate.project_id.as_str())
+        .collect();
+    assert_eq!(candidates, ["bundle-a", "bundle-b"]);
+}
+
+#[test]
+fn a_chosen_checkout_maps_the_package_and_ends_the_warning() {
+    let root = Workspace::new();
+    root.project("app", r#"{"require":{"acme/bundle":"*"}}"#);
+    root.project("bundle-a", r#"{"name":"acme/bundle"}"#);
+    let chosen = root.project("bundle-b", r#"{"name":"acme/bundle"}"#);
+
+    let result = scan_with(&root.0, &preference("acme/bundle", "bundle-b")).unwrap();
+
+    let package = &result.projects[0].packages[0];
+    assert_eq!(package.package_name, "acme/bundle");
+    assert_eq!(package.local_project_id, "bundle-b");
+    // Canonical, because that is the form the scan resolves every path to.
+    assert_eq!(
+        package.local_path,
+        chosen.canonicalize().unwrap().to_string_lossy()
+    );
+    // Resolved is resolved: nothing is left to warn about.
+    assert!(result.warnings.is_empty());
+    // Still reported, so the choice stays visible and changeable.
+    assert_eq!(result.ambiguous[0].chosen.as_deref(), Some("bundle-b"));
+}
+
+#[test]
+fn a_choice_pointing_at_a_vanished_checkout_falls_back_to_asking() {
+    let root = Workspace::new();
+    root.project("app", r#"{"require":{"acme/bundle":"*"}}"#);
+    root.project("bundle-a", r#"{"name":"acme/bundle"}"#);
+    root.project("bundle-b", r#"{"name":"acme/bundle"}"#);
+
+    // A clone that was removed, or renamed, since the choice was made.
+    let result = scan_with(&root.0, &preference("acme/bundle", "bundle-gone")).unwrap();
+
+    assert!(
+        result.projects[0].packages.is_empty(),
+        "a stale choice must never silently map to something else"
+    );
+    assert_eq!(result.ambiguous[0].chosen, None);
+    assert_eq!(
+        result.warnings[0].key,
+        "{name}: multiple local projects found; automatic mapping skipped."
+    );
+}
+
+#[test]
+fn a_choice_for_a_package_with_one_checkout_changes_nothing() {
+    let root = Workspace::new();
+    root.project("app", r#"{"require":{"acme/bundle":"*"}}"#);
+    root.project("bundle", r#"{"name":"acme/bundle"}"#);
+
+    let result = scan_with(&root.0, &preference("acme/bundle", "bundle")).unwrap();
+
+    assert_eq!(result.projects[0].packages[0].local_project_id, "bundle");
+    // Nothing was ambiguous, so nothing is reported as a choice to make.
+    assert!(result.ambiguous.is_empty());
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn a_duplicate_nobody_requires_is_still_worth_knowing_about() {
+    let root = Workspace::new();
+    root.project("bundle-a", r#"{"name":"acme/bundle"}"#);
+    root.project("bundle-b", r#"{"name":"acme/bundle"}"#);
+
+    let result = scan(&root.0).unwrap();
+
+    // Two clones of one package is the thing to report; whether anything requires it
+    // yet is a separate question, and it will the moment a project is added.
+    assert_eq!(result.ambiguous.len(), 1);
+    assert_eq!(result.ambiguous[0].candidates.len(), 2);
 }
 
 #[test]

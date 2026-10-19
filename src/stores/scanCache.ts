@@ -4,7 +4,7 @@ import type { ScanResult } from '../types'
 const SCAN_KEY = 'symfolinker.scan'
 const PROJECT_KEY = 'symfolinker.project'
 // Bump this when the cached shape changes, so older entries are discarded instead of rendered.
-const CACHE_VERSION = 3
+const CACHE_VERSION = 4
 // localStorage holds roughly 5 MB per origin. Staying well below that keeps a very
 // large workspace from failing every later write with a quota error.
 const MAX_CACHE_BYTES = 2_000_000
@@ -47,12 +47,24 @@ function isProject(value: unknown): boolean {
     && isGitInfo(value.git) && Array.isArray(value.packages) && value.packages.every(isPackageStatus)
 }
 
+function isAmbiguousCandidate(value: unknown): boolean {
+  return isRecord(value) && hasStrings(value, ['projectId', 'path'])
+    && isGitInfo(value.git) && isNullableString(value.version)
+}
+
+function isAmbiguousPackage(value: unknown): boolean {
+  return isRecord(value) && typeof value.packageName === 'string'
+    && isNullableString(value.chosen)
+    && Array.isArray(value.candidates) && value.candidates.every(isAmbiguousCandidate)
+}
+
 // The cache is editable outside the app, so it is validated like any other external
 // input: one missing field discards the entry rather than reaching the interface.
 function isScanResult(value: unknown): value is ScanResult {
   return isRecord(value) && typeof value.developmentRoot === 'string'
     && Array.isArray(value.projects) && value.projects.every(isProject)
     && Array.isArray(value.warnings) && value.warnings.every(isMessage)
+    && Array.isArray(value.ambiguous) && value.ambiguous.every(isAmbiguousPackage)
 }
 
 /**

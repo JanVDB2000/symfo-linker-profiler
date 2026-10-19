@@ -39,7 +39,7 @@ pub fn check(root: &Path, project_id: &str) -> Result<PreflightReport, SymfoLink
     let project = PathBuf::from(&project.path);
     // The probes write, so they take the lock like any other write. Checking while a
     // swap is running would also report on a vendor directory in motion.
-    let _lock = RootLock::acquire(&root)?;
+    let lock = RootLock::acquire(&root)?;
     let guard = WriteGuard::new(&root);
 
     let root_result = probe_root(&root);
@@ -48,6 +48,8 @@ pub fn check(root: &Path, project_id: &str) -> Result<PreflightReport, SymfoLink
 
     Ok(PreflightReport {
         root_writable: root_result.is_ok(),
+        // Answered by the lock this check already holds, so it costs nothing extra.
+        locking_supported: lock.locking_supported(),
         vendor_writable: vendor_result.is_ok(),
         link_kind: link_result.as_ref().ok().map(|kind| match kind {
             LinkKind::RelativeSymlink => "symlink",

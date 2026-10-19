@@ -36,7 +36,31 @@ export interface Project {
   composeFile: string | null
   packages: PackageStatus[]
 }
-export interface ScanResult { developmentRoot: string; projects: Project[]; warnings: Message[] }
+/** One checkout that could back a package which has more than one. */
+export interface AmbiguousCandidate {
+  projectId: string
+  path: string
+  /** Two clones of one repository share a name; the branch and commit tell them apart. */
+  git: GitInfo | null
+  version: string | null
+}
+
+/** A package name matching several local checkouts, and the choice made for it. */
+export interface AmbiguousPackage {
+  packageName: string
+  candidates: AmbiguousCandidate[]
+  /** The chosen project id, or null while the question is open. */
+  chosen: string | null
+}
+
+export interface ScanResult {
+  developmentRoot: string
+  projects: Project[]
+  warnings: Message[]
+  /** Packages with more than one checkout under this root. The scanner never picks
+   *  one by itself, so each of these is a question for the person using the app. */
+  ambiguous: AmbiguousPackage[]
+}
 
 /** What `composer dump-autoload` did, and where it did it. */
 export interface AutoloadDump {
@@ -131,6 +155,9 @@ export interface ArchiveEntry {
 /** What a switch needs from the filesystem, checked before one is attempted. */
 export interface PreflightReport {
   rootWritable: boolean
+  /** False on a filesystem without file locking, such as a \\wsl.localhost root.
+   *  Switching still works; a second instance in the same root cannot be noticed. */
+  lockingSupported: boolean
   vendorWritable: boolean
   /** What a link here would become, or null when neither kind could be created. */
   linkKind: 'symlink' | 'junction' | null

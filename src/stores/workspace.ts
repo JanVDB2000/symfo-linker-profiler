@@ -398,6 +398,43 @@ export const useWorkspace = defineStore('workspace', () => {
     if (switched) scheduleMountSync([project.id])
   }
 
+  /// Records which checkout backs a package that has more than one, then rescans.
+  ///
+  /// Root-wide, so one answer serves every project requiring the package. Only an id
+  /// is sent: the scan resolves it to a path, so the interface never supplies one.
+  /// Passing null clears the choice and the scanner asks again.
+  async function setPackageSource(packageName: string, projectId: string | null) {
+    const current = root.value
+    if (!current || swapping.value) return
+    swapping.value = 'source'
+    swapError.value = ''
+    try {
+      if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
+      adoptScan(await invoke<ScanResult>('set_package_source', { developmentRoot: current, packageName, projectId }))
+    } catch (cause) {
+      swapError.value = isMessage(cause) ? cause : { key: 'The checkout choice could not be saved.' }
+    } finally { swapping.value = '' }
+  }
+
+  /// Claims a development-root lock whose holder never came back, then rescans.
+  ///
+  /// Offered only once the backend has reported the lock abandoned, and refused by
+  /// the operating system while a live holder still has the file open. Nothing here
+  /// is automatic: an abandoned lock is a judgement, so a person makes it.
+  async function takeOverLock() {
+    const current = root.value
+    if (!current || swapping.value) return
+    swapping.value = 'lock'
+    swapError.value = ''
+    try {
+      if (!isTauri()) throw { key: 'Open the desktop app with npm run desktop to switch packages.' }
+      adoptScan(await invoke<ScanResult>('take_over_lock', { developmentRoot: current }))
+      void refreshStatus()
+    } catch (cause) {
+      swapError.value = isMessage(cause) ? cause : { key: 'The lock could not be taken over.' }
+    } finally { swapping.value = '' }
+  }
+
   // Mirror every replacement of the scan, so what is on screen is what a restart restores.
   watch(result, current => current && !mutationBlocked.value ? writeScan(current, scannedAt.value) : clearScan())
   watch(selectedId, id => writeSelected(id))
@@ -477,7 +514,12 @@ export const useWorkspace = defineStore('workspace', () => {
 
   async function selectPhpService(service: string) {
     const project = selected.value
-    if (!project || containerBusy.value) return
+    // Saving the service takes the development-root lock, so it must also stand
+    // aside for a switch and for the mount synchronisation that follows one. Without
+    // swapping and mountSyncBusy here, choosing a service inside the 900 ms after a
+    // switch collided with that pass over the same lock, and the collision was
+    // reported as a second SymfoLinker instance.
+    if (!project || containerBusy.value || swapping.value || mountSyncBusy.value) return
     const context = contextVersion
     containerBusy.value = true
     containerError.value = ''
@@ -898,5 +940,5 @@ export const useWorkspace = defineStore('workspace', () => {
     document.removeEventListener('visibilitychange', visibilityChanged)
   })
 
-  return { applyContainerMounts, syncContainerMounts, flushMountSync, mountSync, mountSyncBusy, mountSyncError, mutationBlocked, canSaveProfile, profileBlocked, recoverProject, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, projectGroups, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan, relinkablePackages, relinkPackages, lastSwitch, undoSwitch, archives, archivesBusy, archivesError, loadArchives, deleteArchive, restoreArchive, preflight, preflightBusy, preflightError, runPreflight, autoloadDump, autoloadBusy, autoloadError, dumpAutoload, externalTools, externalError, copiedPath, loadExternalTools, openExternal, copyPath, watching, startWatching, stopWatching }
+  return { applyContainerMounts, syncContainerMounts, flushMountSync, mountSync, mountSyncBusy, mountSyncError, mutationBlocked, canSaveProfile, profileBlocked, recoverProject, takeOverLock, setPackageSource, savedWorkspaces, workspaceProfiles, openWorkspace, removeWorkspace, saveProfile, removeProfile, applyProfile, root, result, scannedAt, fromCache, selectedId, busy, error, search, status, statusError, lastChecked, statusBusy, swapping, swapError, container, containerBusy, containerError, selected, projects, projectGroups, links, linkedPackages, linkedBy, linksFrom, scan, refreshStatus, startPolling, stopPolling, setMode, inspectContainer, selectPhpService, forgetScan, relinkablePackages, relinkPackages, lastSwitch, undoSwitch, archives, archivesBusy, archivesError, loadArchives, deleteArchive, restoreArchive, preflight, preflightBusy, preflightError, runPreflight, autoloadDump, autoloadBusy, autoloadError, dumpAutoload, externalTools, externalError, copiedPath, loadExternalTools, openExternal, copyPath, watching, startWatching, stopWatching }
 })

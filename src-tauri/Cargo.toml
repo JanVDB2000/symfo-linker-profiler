@@ -1,6 +1,6 @@
 [package]
 name = "symfolinker"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.87"
 description = "Switch Composer dependencies between the vendor version and a local checkout"
@@ -34,3 +34,6 @@ tauri-build = { version = "2", optional = true , features = [] }
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"

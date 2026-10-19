@@ -176,6 +176,54 @@ fn stores_the_php_service_above_the_projects() {
 }
 
 #[test]
+fn stores_which_checkout_backs_a_package_for_the_whole_root() {
+    let root = Root::new();
+
+    config::set_package_source(&root.0, "acme/bundle", Some("qa/bundle".to_owned())).unwrap();
+
+    assert_eq!(
+        config::package_sources(&root.0)
+            .get("acme/bundle")
+            .map(String::as_str),
+        Some("qa/bundle")
+    );
+    // Hard rule 2.2: beside the PHP service choice, above the projects.
+    assert!(root.0.join(".symfolinker").join("config.json").is_file());
+}
+
+#[test]
+fn the_checkout_choice_and_the_php_service_do_not_displace_each_other() {
+    // They share one file, and each is written by a read-modify-write pass, so this is
+    // the case where one could silently drop the other.
+    let root = Root::new();
+    let project = root.0.join("app").to_string_lossy().into_owned();
+    config::set_php_service(&root.0, &project, Some("php-fpm".to_owned())).unwrap();
+
+    config::set_package_source(&root.0, "acme/bundle", Some("qa/bundle".to_owned())).unwrap();
+
+    assert_eq!(
+        config::php_service(&root.0, &project).as_deref(),
+        Some("php-fpm")
+    );
+    assert_eq!(
+        config::package_sources(&root.0)
+            .get("acme/bundle")
+            .map(String::as_str),
+        Some("qa/bundle")
+    );
+}
+
+#[test]
+fn clearing_a_checkout_choice_makes_the_scanner_ask_again() {
+    let root = Root::new();
+    config::set_package_source(&root.0, "acme/bundle", Some("qa/bundle".to_owned())).unwrap();
+
+    config::set_package_source(&root.0, "acme/bundle", None).unwrap();
+
+    assert!(config::package_sources(&root.0).is_empty());
+}
+
+#[test]
 fn storing_one_project_leaves_the_others_untouched() {
     let root = Root::new();
     let first = root.0.join("app").to_string_lossy().into_owned();

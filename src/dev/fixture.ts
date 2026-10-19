@@ -205,6 +205,21 @@ export const devFixture: ScanResult = {
   warnings: [
     { key: '{path} has no "name" field; the project was identified by its directory name.', params: { path: path('legacy-crm', 'composer.json') } },
     { key: '{path} is unreadable; package statuses may be incomplete.', params: { path: path('services/media-library', 'vendor') } },
+    { key: '{name}: multiple local projects found; automatic mapping skipped.', params: { name: 'acme/billing' } },
+  ],
+  // The same repository checked out twice: one clone to test a multi-tenant setup,
+  // another kept on a QA branch so neither has to be stashed for the other. Two real
+  // directories with one Composer name, which is why the branch is what tells them
+  // apart rather than the name.
+  ambiguous: [
+    {
+      packageName: 'acme/billing',
+      chosen: null,
+      candidates: [
+        { projectId: 'library/billing', path: path('library/billing'), git: git('main', '4b7e220'), version: '3.2' },
+        { projectId: 'library/billing-qa', path: path('library/billing-qa'), git: git('qa/invoice-rounding', '9ac118e', 3), version: '3.2' },
+      ],
+    },
   ],
 }
 
@@ -320,6 +335,7 @@ export function devArchives(project: Project): ArchiveEntry[] {
 export function devPreflight(): PreflightReport {
   return {
     rootWritable: true,
+    lockingSupported: true,
     vendorWritable: true,
     linkKind: 'symlink',
     freeBytes: 42_000_000_000,

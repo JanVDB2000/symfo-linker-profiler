@@ -28,6 +28,7 @@ SymfoLinker uses Tauri 2, Vue 3, TypeScript, Pinia and Rust.
 | Rust | 1.87+, installed through [rustup](https://rustup.rs). Not optional: the backend is Rust, so `npm run build` alone will not produce a working app. See [Version pinning](#version-pinning). |
 | Git | Required for branch and status information; otherwise that information is unavailable |
 | Linux | WebKitGTK and friends, see below |
+| NixOS | Nothing: `nix develop` provides the toolchain and the libraries together |
 | macOS | Xcode Command Line Tools (`xcode-select --install`) |
 | Windows | MSVC C++ build tools and WebView2 |
 
@@ -44,6 +45,25 @@ source "$HOME/.cargo/env"
 ```
 
 That last line matters: `rustup` adds `cargo` to your `PATH` only for new shells, so without it the terminal you are in still cannot find `cargo`. Add `patchelf` as well if you enable bundling later.
+
+**NixOS**
+
+```bash
+nix develop
+npm ci
+npm run desktop
+```
+
+Nothing is installed: the flake carries Rust, Node, WebKitGTK and GTK, so the shell has
+them and the system does not. The usual advice does not transfer here - there is no
+`apt`, and the rustup tarball's dynamically linked binaries do not run against a
+non-FHS loader - which is why `scripts/check-prerequisites.mjs` recognises NixOS and
+answers `nix develop` instead of naming packages.
+
+`nix build .#default` produces the installable package, and CI builds it on every push
+so the flake cannot rot unnoticed. `glib-networking` is in the closure deliberately:
+without it everything builds and then the webview cannot complete a TLS handshake,
+which reads like a broken network rather than a missing module.
 
 For Fedora, Arch and other distributions, see the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -64,6 +84,7 @@ Common setup failures:
 | --- | --- |
 | `cargo metadata` fails with `No such file or directory (os error 2)` | Rust is not installed, or `cargo` is not on the `PATH` of this shell. The path is missing, not the file. Install rustup, then run `source "$HOME/.cargo/env"` or open a new terminal. |
 | `failed to run custom build command for 'glib-sys'`, or pkg-config errors naming `webkit2gtk`, `javascriptcoregtk` or `soup` | The Linux system libraries above are missing. Install them and build again. |
+| Advice to run `sudo apt install` on a machine that has no `apt` | You are on NixOS outside the development shell. Run `nix develop` first; the check recognises NixOS and should say so itself. |
 
 ### Version pinning
 
@@ -247,7 +268,11 @@ After updating the version fields, create and push a matching `v<version>` Git t
 
 That builds Windows, Linux, and both macOS architectures, then opens a **draft** release with the artifacts attached, so it can be checked before anyone can download it. Publish the draft to make it live.
 
-Bump `version` in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` to match the tag before tagging.
+Bump `version` in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` to match the tag before tagging. The flake reads the version out of `Cargo.toml`, so it is not a fourth place to change.
+
+NixOS installs from the tag rather than from an attached file, because a prebuilt
+installer cannot run there: `nix profile install github:JanVDB2000/symfo-linker-profiler/v<version>`.
+Pushing the tag is therefore the whole release for NixOS, and no asset corresponds to it.
 
 ## Contributing
 

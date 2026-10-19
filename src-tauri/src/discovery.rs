@@ -1,5 +1,7 @@
-use crate::models::{GitInfo, Message, PackageStatus, Project, ScanResult};
-use crate::{autoload, backup, constraint, journal};
+use crate::models::{
+    AmbiguousCandidate, AmbiguousPackage, GitInfo, Message, PackageStatus, Project, ScanResult,
+};
+use crate::{autoload, backup, config, constraint, journal};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -57,7 +59,18 @@ pub fn valid_package_name(name: &str) -> bool {
         })
 }
 
+/// Reads the workspace, honouring the stored choice of checkout for any package that
+/// has more than one.
 pub fn scan(root: &Path) -> Result<ScanResult, Message> {
+    scan_with(root, &config::package_sources(root))
+}
+
+/// As [`scan`], with the choices supplied rather than read from disk.
+///
+/// Separated so the rule for resolving a duplicated package is testable without a
+/// configuration file, and so the read-only promise stays easy to see: this function
+/// is handed the answers and never writes one back, however stale it turns out to be.
+pub fn scan_with(root: &Path, preferred: &BTreeMap<String, String>) -> Result<ScanResult, Message> {
     let root = root
         .canonicalize()
         .map_err(|_| Message::new("The development root does not exist or is not readable."))?;
@@ -132,14 +145,48 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
             }
         }
     }
+    // Two checkouts of one package is a question rather than a failure. The scanner
+    // still refuses to answer it - guessing would link the wrong clone silently - but
+    // it reports the candidates so the choice can be made, and honours the stored
+    // answer when there is one.
+    let mut ambiguous = Vec::new();
+    let mut resolved: BTreeMap<&str, usize> = BTreeMap::new();
     for (name, matches) in &index {
-        if matches.len() > 1 {
-            warnings.push(Message::with(
+        if matches.len() < 2 {
+            continue;
+        }
+        let chosen = preferred
+            .get(name)
+            .and_then(|id| matches.iter().copied().find(|&i| found[i].0.id == *id));
+        match chosen {
+            Some(i) => {
+                resolved.insert(name.as_str(), i);
+            }
+            // Also the case where a stored choice named a checkout that has since been
+            // removed or renamed: falling back to asking is the only safe answer, and
+            // the stale entry is left alone rather than rewritten, because a scan does
+            // not write.
+            None => warnings.push(Message::with(
                 "{name}: multiple local projects found; automatic mapping skipped.",
                 "name",
                 name.clone(),
-            ));
+            )),
         }
+        ambiguous.push(AmbiguousPackage {
+            package_name: name.clone(),
+            candidates: matches
+                .iter()
+                .map(|&i| AmbiguousCandidate {
+                    project_id: found[i].0.id.clone(),
+                    path: found[i].0.path.clone(),
+                    // Two clones of one repository share a name, so the branch and
+                    // commit are what tell them apart in the interface.
+                    git: found[i].0.git.clone(),
+                    version: found[i].1.version.clone(),
+                })
+                .collect(),
+            chosen: chosen.map(|i| found[i].0.id.clone()),
+        });
     }
     for i in 0..found.len() {
         // Read once per project rather than once per package: it is a single file
@@ -177,10 +224,18 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
                 let Some(matches) = index.get(name) else {
                     continue;
                 };
-                if matches.len() != 1 || matches[0] == i {
+                // One checkout maps itself; several map only once a choice is stored.
+                let target = match matches.as_slice() {
+                    [only] => *only,
+                    _ => match resolved.get(name.as_str()) {
+                        Some(&chosen) => chosen,
+                        None => continue,
+                    },
+                };
+                if target == i {
                     continue;
                 }
-                let local = &found[matches[0]];
+                let local = &found[target];
                 let vendor_root = found[i].2.join("vendor");
                 let vendor_path = vendor_root.join(name);
                 let backup_path = vendor_root.join(".symfolinker").join(name);
@@ -256,10 +311,21 @@ pub fn scan(root: &Path) -> Result<ScanResult, Message> {
         packages.sort_by(|a, b| a.package_name.cmp(&b.package_name));
         found[i].0.packages = packages;
     }
+    // Said once the lock has found out, which is why it is reported here rather than
+    // raised as an error there: switching still works on such a filesystem, and
+    // refusing to work would be worse than working without the guarantee.
+    if crate::lock::locking_unsupported(&root) {
+        warnings.push(Message::with(
+            "This filesystem cannot lock files ({path}). SymfoLinker will continue, but it cannot detect a second instance working in this development root.",
+            "path",
+            display(&root),
+        ));
+    }
     Ok(ScanResult {
         development_root: display(&root),
         projects: found.into_iter().map(|item| item.0).collect(),
         warnings,
+        ambiguous,
     })
 }
 

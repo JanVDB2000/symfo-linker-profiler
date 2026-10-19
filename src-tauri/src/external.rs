@@ -127,6 +127,12 @@ pub const TOOLS: &[Tool] = &[
     },
     // A terminal emulator opens in the directory it was started in; the alternative is
     // a different flag for every one of them.
+    //
+    // The Debian alternatives symlink stays first, because on a Debian or Ubuntu
+    // machine it points at the terminal the user actually chose. It does not exist
+    // everywhere though - NixOS has no alternatives system - so the desktop terminals
+    // follow, and then the standalone ones that are often the only terminal installed.
+    // First one found wins.
     Tool {
         id: "terminal",
         binaries: &[
@@ -134,6 +140,11 @@ pub const TOOLS: &[Tool] = &[
             "gnome-terminal",
             "konsole",
             "xfce4-terminal",
+            "alacritty",
+            "kitty",
+            "wezterm",
+            "foot",
+            "ghostty",
         ],
         arguments: &[],
         pass: Pass::WorkingDirectory,

@@ -12,6 +12,15 @@ use std::{collections::BTreeMap, fs, path::Path, path::PathBuf};
 pub struct AppConfig {
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectConfig>,
+    /// Which local checkout backs a package that has more than one, as
+    /// `vendor/package` to project id. Root-wide rather than per project: the same
+    /// clone is wanted everywhere in a root, and asking once per consumer would mean
+    /// answering the same question for every application that requires the bundle.
+    ///
+    /// `serde(default)` on both members is what keeps a configuration written by an
+    /// older version readable.
+    #[serde(default)]
+    pub packages: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -34,6 +43,38 @@ pub fn load(development_root: &Path) -> AppConfig {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+/// Which checkout backs each package that has more than one. Empty when none is set.
+pub fn package_sources(development_root: &Path) -> BTreeMap<String, String> {
+    load(development_root).packages
+}
+
+/// Stores which local checkout backs one package, for every project in this root.
+/// Passing `None` clears the choice, so the scanner asks again.
+///
+/// Read, change and write is one operation under the development-root lock, for the
+/// same reason as [`set_php_service`]: two writers that each loaded the file first
+/// would have the last one silently drop the other's choice.
+pub fn set_package_source(
+    development_root: &Path,
+    package_name: &str,
+    project_id: Option<String>,
+) -> Result<(), SymfoLinkerError> {
+    let _lock = RootLock::acquire_for(development_root, "a checkout choice")?;
+
+    let mut config = load(development_root);
+    match project_id {
+        Some(id) => config.packages.insert(package_name.to_owned(), id),
+        None => config.packages.remove(package_name),
+    };
+
+    let path = config_path(development_root);
+    let json = serde_json::to_vec_pretty(&config).map_err(|error| SymfoLinkerError::IoError {
+        path: path.to_string_lossy().into_owned(),
+        detail: error.to_string(),
+    })?;
+    write_atomically(&path, &json)
 }
 
 /// The PHP service chosen for this project, if the user picked one.

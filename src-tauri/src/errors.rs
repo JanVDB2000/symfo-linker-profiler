@@ -35,6 +35,13 @@ pub enum SymfoLinkerError {
     WriteDenied { path: String },
     /// Another SymfoLinker instance holds the development-root lock.
     LockUnavailable { path: String },
+    /// This same instance is still finishing something in this development root.
+    /// Distinct from `LockUnavailable`, because naming a second instance that does
+    /// not exist sent people hunting for one.
+    LockBusy { path: String },
+    /// The lock is held by a holder that looks abandoned: an old record, from this
+    /// machine, belonging to a run of the app that is not this one.
+    LockStale { path: String, minutes: String },
     /// A filesystem call failed; `detail` carries the operating system wording.
     IoError { path: String, detail: String },
 }
@@ -108,6 +115,20 @@ impl SymfoLinkerError {
                 "path",
                 path.clone(),
             ),
+            Self::LockBusy { path } => Message::with(
+                "SymfoLinker is still finishing another operation in this development root ({path}). Try again in a moment.",
+                "path",
+                path.clone(),
+            ),
+            Self::LockStale { path, minutes } => {
+                let mut message = Message::with(
+                    "SymfoLinker locked this development root {minutes} minutes ago and never finished ({path}). Take the lock over to continue.",
+                    "path",
+                    path.clone(),
+                );
+                message.params.insert("minutes".to_owned(), minutes.clone());
+                message
+            }
             Self::IoError { path, detail } => {
                 let mut message = Message::with(
                     "SymfoLinker cannot modify {path}. Reason: {detail}",

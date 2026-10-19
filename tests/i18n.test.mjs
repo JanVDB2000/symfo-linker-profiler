@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
@@ -25,7 +25,7 @@ let i18nSource = read('src/i18n/index.ts').replaceAll("from 'vue'", `from '${vue
 for (const code of Object.keys(catalogs)) i18nSource = i18nSource.replace(`import ${code} from './locales/${code}.json'`, `const ${code} = ${JSON.stringify(catalogs[code])}`)
 const i18nUrl = dataModule(transpile(i18nSource))
 const i18n = await import(i18nUrl)
-const tauriUrl = dataModule('export const isTauri = () => false; export const invoke = async () => { throw new Error("Unexpected IPC call") }; export const open = async () => null;')
+const tauriUrl = dataModule('export const isTauri = () => false; export const invoke = async () => { throw new Error("Unexpected IPC call") }; export const open = async () => null; export const getVersion = async () => "0.0.0";')
 const scanCacheUrl = dataModule(transpile(read('src/stores/scanCache.ts').replaceAll("from '../i18n/translator'", `from '${translatorUrl}'`)))
 const workspaceUrl = dataModule(transpile(read('src/stores/workspace.ts')
   .replaceAll("from 'vue'", `from '${vueUrl}'`)
@@ -43,10 +43,20 @@ function vueModule(path, id, replacements = {}, transformSource = source => sour
 }
 const iconUrl = vueModule('src/components/ProfilerIcon.vue', 'icon')
 const spinnerUrl = vueModule('src/components/Spinner.vue', 'spinner')
+const ambiguousUrl = vueModule('src/components/AmbiguousPackages.vue', 'ambiguous', {
+  '../stores/workspace': workspaceUrl, './ProfilerIcon.vue': iconUrl,
+  './Spinner.vue': spinnerUrl, '../i18n': i18nUrl,
+})
+const updateUrl = vueModule('src/components/UpdateCheck.vue', 'update', {
+  '@tauri-apps/api/core': tauriUrl, '@tauri-apps/api/app': tauriUrl,
+  './Spinner.vue': spinnerUrl, '../i18n': i18nUrl,
+})
 const appUrl = vueModule('src/App.vue', 'app', {
   '@tauri-apps/plugin-dialog': tauriUrl, '@tauri-apps/api/core': tauriUrl,
   './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl,
   './components/Spinner.vue': spinnerUrl, './i18n': i18nUrl,
+  './components/AmbiguousPackages.vue': ambiguousUrl,
+  './components/UpdateCheck.vue': updateUrl,
 })
 const { default: App } = await import(appUrl)
 
@@ -66,7 +76,9 @@ test('all four catalogs have identical keys and interpolation parameters', () =>
 })
 
 test('all literal frontend and backend message keys exist in the catalogs', () => {
-  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/container.rs', 'src-tauri/src/lib.rs', 'src-tauri/src/history.rs', 'src-tauri/src/preflight.rs', 'src-tauri/src/relink.rs', 'src-tauri/src/dump_autoload.rs', 'src-tauri/src/external.rs', 'src-tauri/src/watch.rs']) {
+  // errors.rs belongs here above all: every refusal a mutation can produce is worded
+  // there, and it went unchecked while smaller sources were covered.
+  for (const path of ['src/App.vue', 'src/stores/workspace.ts', 'src/dev/fixture.ts', 'src-tauri/src/errors.rs', 'src-tauri/src/discovery.rs', 'src-tauri/src/runtime.rs', 'src-tauri/src/container.rs', 'src-tauri/src/lib.rs', 'src-tauri/src/history.rs', 'src-tauri/src/preflight.rs', 'src-tauri/src/relink.rs', 'src-tauri/src/dump_autoload.rs', 'src-tauri/src/external.rs', 'src-tauri/src/watch.rs']) {
     const source = read(path)
     const patterns = [ /\bt\('((?:\\.|[^'\\])*)'/g, /key: '((?:\\.|[^'\\])*)'/g, /Message::(?:new|with)\(\s*"((?:\\.|[^"\\])*)"/g ]
     for (const pattern of patterns) for (const match of source.matchAll(pattern)) {
@@ -111,11 +123,26 @@ test('the rendered app translates navigation, warnings and errors in every langu
     setActivePinia(pinia)
     const workspace = useWorkspace()
     workspace.error = { key: 'Choose a development root first.' }
-    workspace.result = { developmentRoot: 'D:\\dev', projects: [], warnings: [{ key: '{path} is unreadable; package statuses may be incomplete.', params: { path: '<unsafe>' } }] }
+    workspace.result = {
+      developmentRoot: 'D:\\dev', projects: [],
+      warnings: [{ key: '{path} is unreadable; package statuses may be incomplete.', params: { path: '<unsafe>' } }],
+      // A package with two checkouts, carrying a branch name from the filesystem:
+      // candidate data is as untrusted as a warning parameter, and is escaped too.
+      ambiguous: [{
+        packageName: 'acme/bundle',
+        chosen: null,
+        candidates: [
+          { projectId: 'bundle-a', path: 'D:\\dev\\bundle-a', git: { branch: '<unsafe>', commit: '4b7e220', dirty: false, changedFiles: 0 }, version: null },
+          { projectId: 'bundle-b', path: 'D:\\dev\\bundle-b', git: null, version: '2.1' },
+        ],
+      }],
+    }
     const html = await renderToString(createSSRApp(App).use(pinia))
     assert.ok(html.includes(catalogs[code].Projects), code)
     assert.ok(html.includes(catalogs[code].Settings), code)
     assert.ok(html.includes(catalogs[code]['Choose a development root first.']), code)
+    assert.ok(html.includes(catalogs[code]['More than one checkout']), code)
+    assert.ok(html.includes(catalogs[code]['Use this checkout']), code)
     assert.ok(html.includes('&lt;unsafe&gt;'), 'parameters must be escaped by Vue')
     assert.ok(!html.includes('<unsafe>'))
   }
@@ -134,7 +161,9 @@ test('the Settings panel renders a translated language selector in every languag
   const settingsUrl = vueModule('src/App.vue', 'settings', {
     '@tauri-apps/plugin-dialog': tauriUrl, '@tauri-apps/api/core': tauriUrl,
     './stores/workspace': workspaceUrl, './components/ProfilerIcon.vue': iconUrl,
-  './components/Spinner.vue': spinnerUrl, './i18n': i18nUrl,
+    './components/Spinner.vue': spinnerUrl, './i18n': i18nUrl,
+    './components/AmbiguousPackages.vue': ambiguousUrl,
+    './components/UpdateCheck.vue': updateUrl,
   }, source => source.replace("const tab = ref('Projects')", "const tab = ref('Settings')"))
   const { default: SettingsApp } = await import(settingsUrl)
   for (const code of Object.keys(catalogs)) {
@@ -156,6 +185,28 @@ test('the saved language is restored when the translation module initializes', a
   assert.equal(restored.locale.value, 'fr')
   assert.equal(restored.t('Projects'), 'Projets')
   assert.equal(document.documentElement.lang, 'fr')
+})
+
+test('Nix update instructions install the detected release tag in every language', async () => {
+  for (const tag of ['v0.6.0', '0.6.1']) {
+    const readyUrl = vueModule('src/components/UpdateCheck.vue', `update-${tag}`, {
+      '@tauri-apps/api/core': tauriUrl, '@tauri-apps/api/app': tauriUrl,
+      './Spinner.vue': spinnerUrl, '../i18n': i18nUrl,
+    }, source => source
+      .replace("const latest = ref('')", `const latest = ref('${tag.replace(/^v/, '')}')`)
+      .replace("const releaseTag = ref('')", `const releaseTag = ref('${tag}')`)
+      .replace("ref<Channel>('package')", "ref<Channel>('nix')")
+      .replace('const checked = ref(false)', 'const checked = ref(true)'))
+    const { default: UpdateCheck } = await import(readyUrl)
+    for (const code of Object.keys(catalogs)) {
+      i18n.locale.value = code
+      const html = await renderToString(createSSRApp(UpdateCheck))
+      assert.ok(html.includes(`nix profile install github:JanVDB2000/symfo-linker-profiler/${tag}`))
+      assert.ok(html.includes('nix profile list'))
+      assert.ok(html.includes('nix profile remove &lt;name&gt;'))
+      assert.ok(!html.includes('nix profile upgrade'))
+    }
+  }
 })
 
 

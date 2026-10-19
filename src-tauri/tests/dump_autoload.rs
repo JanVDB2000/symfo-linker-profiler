@@ -138,9 +138,16 @@ fn echo(text: &str) -> (String, Vec<String>) {
         vec!["/C".to_owned(), "echo".to_owned(), text.to_owned()],
     )
 }
+// Through the shell rather than /bin/echo: NixOS provides only /bin/sh, so the
+// absolute path to a coreutils binary does not exist there - nor inside a Nix build
+// sandbox, where this test would otherwise fail the check phase. /bin/sh is the one
+// absolute path that is safe to assume, which is why `failing` below already uses it.
 #[cfg(not(windows))]
 fn echo(text: &str) -> (String, Vec<String>) {
-    ("/bin/echo".to_owned(), vec![text.to_owned()])
+    (
+        "/bin/sh".to_owned(),
+        vec!["-c".to_owned(), format!("echo {text}")],
+    )
 }
 
 #[cfg(windows)]

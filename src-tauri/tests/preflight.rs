@@ -150,7 +150,9 @@ fn checking_waits_for_a_switch_rather_than_writing_beside_it() {
     workspace.installed();
     let held = RootLock::acquire(&workspace.0).unwrap();
     let error = preflight::check(&workspace.0, "app").unwrap_err();
-    assert!(matches!(error, SymfoLinkerError::LockUnavailable { .. }));
+    // LockBusy, not LockUnavailable: the holder is this same process, and there is no
+    // second instance to send anyone looking for.
+    assert!(matches!(error, SymfoLinkerError::LockBusy { .. }));
     drop(held);
     assert!(preflight::check(&workspace.0, "app").is_ok());
 }

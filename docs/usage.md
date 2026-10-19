@@ -24,6 +24,7 @@ Most people do not need this repository. Grab an installer from the [latest rele
 | Windows | `.msi` or `.exe` setup |
 | macOS | `.dmg` (separate builds for Apple silicon and Intel) |
 | Linux | `.AppImage`, `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/RHEL) |
+| NixOS | Built from source: `nix profile install github:JanVDB2000/symfo-linker-profiler/v0.5.0` |
 
 Releases also contain `SymfoLinker_*.app.tar.gz`. Those are macOS update bundles, not downloads: use the `.dmg`.
 
@@ -36,6 +37,12 @@ Release binaries are unsigned, so Windows and macOS may display security warning
 - **Windows** shows "Windows protected your PC". Choose *More info*, then *Run anyway*.
 - **macOS** says the app "cannot be opened because the developer cannot be verified". Right-click the app, choose *Open*, then confirm; or run `xattr -dr com.apple.quarantine /Applications/SymfoLinker.app`.
 - **Linux** AppImages need the executable bit: `chmod +x SymfoLinker_*.AppImage`.
+- **NixOS** cannot run any of those downloads. An installer carries the glibc and the
+  WebKitGTK of the machine it was built on, and on NixOS neither sits where the binary
+  looks for it. Install from the flake instead, which builds against this machine's own
+  nixpkgs: `nix profile install github:JanVDB2000/symfo-linker-profiler/v0.5.0`. The
+  question of trusting an unsigned binary does not arise there, because the build is
+  your own.
 
 If you would rather not trust an unsigned binary, building from source is the alternative, and every release is built from this repository by [the release workflow](../.github/workflows/release.yml).
 
@@ -245,7 +252,7 @@ The scan is deliberately strict and predictable:
 - A directory without `composer.json` is not a project.
 - Skip unreadable or invalid JSON manifests **with** a warning.
 - Package names must have the form `vendor/package`, using lowercase letters, digits and `_ . -`, starting with an alphanumeric character and not ending with a dot. Platform requirements (`php`, `ext-json`) and traversal attempts (`../bundle`, `acme/..`, `C:/bundle`) are excluded from mapping.
-- If multiple projects share a package name, skip the mapping with a warning rather than guessing.
+- If multiple projects share a package name, skip the mapping with a warning rather than guessing. The candidates are reported so the choice can be made by hand; see [More than one checkout](#more-than-one-checkout).
 - Do not map a project to itself.
 - **Multiple and chained links** are supported. Each project is inspected at its own path: `a` can link both `acme/b` and `acme/d`, while `d` links `acme/c`. Links do not interfere because the scanner never traverses a package link to inspect another project.
 - Sort projects by their path below the root, which keeps a group's projects together, and packages by package name.
@@ -393,6 +400,35 @@ Without a Compose file the runtime is native and only host validation applies. A
 
 Warnings are collected per scan and displayed in an expandable block above the panel content. They cover unreadable directories in the root, invalid manifests, invalid Composer package names and duplicate package names.
 
+### More than one checkout
+
+The same repository is often checked out twice under one root on purpose: one clone to
+test a multi-tenant setup, another on a QA branch so neither has to be stashed for the
+other. Both declare the same Composer name, so the scanner cannot tell which one a link
+should use, and it refuses to guess - linking the wrong clone silently would be worse
+than linking nothing at all.
+
+Instead the candidates are listed under the scan warnings, each with its branch and
+commit, which is what actually distinguishes two clones of one repository. Choosing one
+stores it in `<root>/.symfolinker/config.json` and the warning stops.
+
+The choice belongs to the development root, not to a single project: every project in
+the root that requires that package links the chosen checkout. *Ask again* clears it. A
+stored choice naming a checkout that has since been removed or renamed is ignored rather
+than quietly redirected, so the question simply reappears.
+
+### File locking
+
+Health reports whether this filesystem can lock files. It usually can; a
+`\\wsl.localhost` development root and some network shares cannot. Switching still
+works there, because within one running copy of SymfoLinker the lock is this app's own
+discipline, but a second copy working in the same root could not be noticed. The scan
+warnings say so when that is the case.
+
+If an operation is interrupted badly enough that the lock survives it, the error offers
+*Take over the lock*. It is never automatic, and it still refuses while a live holder
+has the file open - which is the operating system's judgement rather than a guess.
+
 ## Common messages
 
 | English message | Cause and solution |
@@ -401,7 +437,11 @@ Warnings are collected per scan and displayed in an expandable block above the p
 | *The development root does not exist or is not readable.* | The path is missing or lacks read permissions. |
 | *Choose a directory as the development root.* | The supplied path is a file. |
 | *No Composer projects found* | You may be inside a project. Choose its parent directory. |
-| *…: multiple local projects found* | Two projects share a Composer name; make the names unique. |
+| *…: multiple local projects found* | Two checkouts share a Composer name. Choose which one to link under the scan warnings; see [More than one checkout](#more-than-one-checkout). |
+| *Another SymfoLinker instance is working in this development root…* | A second copy of the app holds the lock. Close it, or wait for it to finish. |
+| *SymfoLinker is still finishing another operation in this development root…* | This same copy is mid-operation. It queues briefly by itself; a long `composer dump-autoload` outlasts that wait. |
+| *SymfoLinker locked this development root … and never finished* | An interrupted run left the lock behind. Use *Take over the lock* on the error. |
+| *This filesystem cannot lock files…* | A `\\wsl.localhost` root or a network share. Switching works; a second instance cannot be detected. |
 | *Invalid path* | A vendor path or ancestor is a link or is not a directory. |
 | *No Git information* | The project has no `.git`, or Git is missing from `PATH`. |
 | *{engine} is unavailable. Is it running?* | The Docker or Podman daemon did not respond. Container status is unknown until it does. |

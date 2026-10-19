@@ -271,6 +271,9 @@ pub fn run() {
             delete_archive,
             restore_archive,
             preflight_checks,
+            set_package_source,
+            take_over_lock,
+            update_channel,
             dump_autoload,
             external_tools,
             open_external,
@@ -432,6 +435,72 @@ async fn preflight_checks(
     })
     .await
     .map_err(|_| models::Message::new("The write checks could not be completed."))?
+}
+
+/// How this copy of SymfoLinker can be updated, which depends on how it was installed.
+///
+/// The interface needs this because an update is not one thing. A Windows installer
+/// and a macOS bundle can be replaced in place; an AppImage can replace its own file;
+/// a package from a distribution is owned by that distribution; and a Nix store path
+/// is read only, so nothing can replace it at all - there the answer is to upgrade the
+/// profile. Reporting the wrong one would mean offering a button that cannot work.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn update_channel() -> &'static str {
+    // Set by the Nix derivation at build time, because nothing about the running
+    // process reliably says "this came from a read-only store".
+    if option_env!("SYMFOLINKER_UPDATE_CHANNEL") == Some("nix") {
+        return "nix";
+    }
+    if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
+        return "managed";
+    }
+    // Set by the AppImage runtime itself, and the only dependable sign of one.
+    if std::env::var_os("APPIMAGE").is_some() {
+        return "appimage";
+    }
+    "package"
+}
+
+/// Records which local checkout backs a package that has more than one, then rescans
+/// so the choice is visible immediately. `project_id` of `None` clears it.
+///
+/// Root-wide, so one answer serves every project that requires the package. The path
+/// itself is never accepted from the interface: only an id, which the scan resolves.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_package_source(
+    development_root: String,
+    package_name: String,
+    project_id: Option<String>,
+) -> Result<models::ScanResult, models::Message> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&development_root);
+        config::set_package_source(root, &package_name, project_id)
+            .map_err(|error| error.message())?;
+        discovery::scan(root)
+    })
+    .await
+    .map_err(|_| models::Message::new("The checkout choice could not be saved."))?
+}
+
+/// Takes over a development-root lock whose holder cannot answer, then rescans.
+///
+/// Never automatic: hard rule 2.3. The interface only offers this once the lock has
+/// reported itself abandoned, and the takeover still refuses while a live holder's
+/// handle is open.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn take_over_lock(development_root: String) -> Result<models::ScanResult, models::Message> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&development_root);
+        // Dropped immediately: claiming the lock is what breaks the orphan, and
+        // holding it afterwards would only block the work that follows.
+        lock::RootLock::take_over(root).map_err(|error| error.message())?;
+        discovery::scan(root)
+    })
+    .await
+    .map_err(|_| models::Message::new("The lock could not be taken over."))?
 }
 
 #[cfg(feature = "desktop")]

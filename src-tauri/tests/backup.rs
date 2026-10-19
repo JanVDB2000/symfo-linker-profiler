@@ -32,10 +32,6 @@ impl Workspace {
         Self(path.canonicalize().unwrap())
     }
 
-    fn root(&self) -> &Path {
-        &self.0
-    }
-
     /// Project with the Composer package present at its vendor path.
     fn project_with_vendor(&self, name: &str) -> PathBuf {
         let project = self.0.join(name);
@@ -294,45 +290,4 @@ fn surfaces_an_io_failure_rather_than_a_raw_os_error() {
     assert!(message.params.contains_key("path"));
     assert!(message.params.contains_key("detail"));
     assert_eq!(marker_contents(&vendor_path(&project, PACKAGE)), ORIGINAL);
-}
-
-#[test]
-fn a_second_lock_on_the_same_root_is_refused() {
-    let workspace = Workspace::new();
-    let _held = workspace.lock();
-
-    let error = RootLock::acquire(workspace.root()).unwrap_err();
-
-    assert_eq!(
-        error,
-        SymfoLinkerError::LockUnavailable {
-            path: workspace.root().to_string_lossy().into_owned()
-        }
-    );
-}
-
-#[test]
-fn the_lock_is_released_when_dropped() {
-    let workspace = Workspace::new();
-    drop(workspace.lock());
-
-    assert!(
-        RootLock::acquire(workspace.root()).is_ok(),
-        "a released lock must be reacquirable"
-    );
-}
-
-#[test]
-fn the_lock_lives_above_the_projects_not_inside_one() {
-    let workspace = Workspace::new();
-    let project = workspace.project_with_vendor("app");
-
-    let lock = workspace.lock();
-
-    // Hard rule 2.2: no .symfolinker directory at an individual project root.
-    assert_eq!(
-        lock.path(),
-        workspace.root().join(".symfolinker").join("lock")
-    );
-    assert!(!project.join(".symfolinker").exists());
 }

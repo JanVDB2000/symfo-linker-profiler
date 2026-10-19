@@ -6,6 +6,37 @@ pub struct ScanResult {
     pub development_root: String,
     pub projects: Vec<Project>,
     pub warnings: Vec<Message>,
+    /// Packages with more than one local checkout under this root, so the interface
+    /// can offer the choice the scanner refuses to make for itself.
+    pub ambiguous: Vec<AmbiguousPackage>,
+}
+
+/// One package name that matches several local projects.
+///
+/// This sits on the scan rather than on a package, because the choice is made once per
+/// development root and then holds for every project that requires the package. Which
+/// also keeps `PackageStatus` carrying exactly one local path, as every mutation and
+/// the frontend cache already rely on.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbiguousPackage {
+    pub package_name: String,
+    pub candidates: Vec<AmbiguousCandidate>,
+    /// The project id chosen for this root, when one is stored and still a candidate.
+    pub chosen: Option<String>,
+}
+
+/// One checkout that could back an ambiguous package.
+///
+/// Two clones of the same repository have the same Composer name and often the same
+/// directory name, so the branch and commit are what tell them apart.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbiguousCandidate {
+    pub project_id: String,
+    pub path: String,
+    pub git: Option<GitInfo>,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +256,10 @@ pub struct ArchiveEntry {
 pub struct PreflightReport {
     /// `<root>/.symfolinker/` can be created and written: the lock lives there.
     pub root_writable: bool,
+    /// Whether this filesystem can lock files at all. False on the `\\wsl.localhost`
+    /// 9P redirector and on some network shares, where switching still works but a
+    /// second instance working in the same root could not be noticed.
+    pub locking_supported: bool,
     /// `<project>/vendor/` accepts a new entry, which every backup and link needs.
     pub vendor_writable: bool,
     /// What a link in this project would become: `symlink` or `junction`. `None` when

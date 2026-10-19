@@ -59,6 +59,28 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features -- -D warnings
 
+  # NixOS cannot run the deb or the AppImage this project releases, so it installs
+  # from the flake instead. A flake nobody builds is a flake that quietly stops
+  # working, which is the whole reason this job exists: it builds the real package,
+  # check phase included, on every push.
+  nix:
+    name: Nix package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # -L keeps the full build log, so a failure names the derivation that actually
+      # broke rather than only the one that depended on it.
+      - name: Build the package
+        run: nix build .#default -L
+
+      - name: Check the flake outputs
+        run: nix flake check -L
+
   # The desktop feature pulls in Tauri and needs system libraries, so it is checked
   # once rather than on every platform.
   desktop:
